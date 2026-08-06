@@ -118,6 +118,7 @@ Email : sb53systems@gmail.com
   
 This project began in June 2024.  
 Compiled with `Delphi 12 Community Edition`.  
+[![Made in Algeria](https://www.madeinalgeria.dev/badge/g-code-flow-temperature-controller.svg)](https://www.madeinalgeria.dev/projects/g-code-flow-temperature-controller)  
   
 ![SB53-Systems~1](https://github.com/sb53systems/G-Code-Flow-Temperature-Controller/assets/33290411/b94703a1-cf21-4109-bfa6-b9bcff438a1d)  
   
