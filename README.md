@@ -115,6 +115,7 @@ This project is licensed under the MIT License.
 ### By Salim BELAYEL.  
 Discord: sb53systems  
 Email : sb53systems@gmail.com  
+[![Made in Algeria](https://www.madeinalgeria.dev/badge/g-code-flow-temperature-controller.svg)](https://www.madeinalgeria.dev/projects/g-code-flow-temperature-controller)  
   
 This project began in June 2024.  
 Compiled with `Delphi 12 Community Edition`.  
