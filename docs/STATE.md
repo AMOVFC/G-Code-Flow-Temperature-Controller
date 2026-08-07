@@ -66,8 +66,8 @@ next until the current one's exit criteria are met and this file is updated.
 | # | Milestone | Status | Exit criteria |
 |---|---|---|---|
 | **M1** | **Foundations** — docs, ADRs, CMake skeleton, test harness | ✅ **done** | ~~Build and tests green; docs reviewed~~ |
-| **M2** | **Data model + G-code scanner** | 🟡 in progress | Scanner extracts markers, IDs, body bounds, M82/M83 guard from real files; unit tested |
-| M3 | Estimator integration + flow aggregation | ⚪ not started | Per-second flow timeline produced from a recorded fixture, no live subprocess in tests |
+| **M2** | **Data model + G-code scanner** | ✅ **done** | ~~Scanner extracts markers, IDs, body bounds, M82/M83 guard from real files; unit tested~~ |
+| **M3** | **Estimator integration + flow aggregation** | 🟡 in progress | Per-second flow timeline produced from a recorded fixture, no live subprocess in tests |
 | M4 | Temperature planner | ⚪ not started | Blend → smooth → map → slew-limit, each unit tested; plan dumped as CSV |
 | M5 | G-code rewriter | ⚪ not started | Valid output G-code; feedrate clamp and PA gating verified |
 | M6 | CLI end-to-end | ⚪ not started | `sb53 process in.gcode` produces a printable file; **usable as an Orca post-processing script** |
@@ -115,26 +115,45 @@ all, and it is the artifact the future OrcaSlicer cloud plugin needs.
   `PRINT_START EXTRUDER_TEMP=213.3 BED_TEMP=65    ; Reset Initial Temperature`; speed
   lines carry `; Keep Slicer Speed` / `; Reset Speed Before Retraction` comments.
 
-### In progress (M2)
-Nothing implemented yet. `Model.hpp` defines the types the scanner will populate
-(`ScanResult`, `ExtrusionMode`); `GcodeScanner.cpp` does not exist.
+- **M2 complete.** `GcodeScanner` works on real 73k-line files; 18/18 tests green.
+
+  Try it:
+  ```powershell
+  ./build/bin/sb53.exe scan testdata/fixtures/orca-basic.gcode
+  ```
+
+  Two structural findings worth remembering:
+  - **`printer_settings_id` and `filament_settings_id` live in the config block at the
+    *end* of the file**, after `; EXECUTABLE_BLOCK_END` — not in the header. The scan
+    cannot stop once the body is bounded or profile auto-selection is silently lost.
+  - **`filament_settings_id` values are quoted by OrcaSlicer** (`"Elegoo HS PLA+ awd
+    hott"`). The quotes are its escaping and are stripped.
+
+  Decision made here: absence of both `M82` and `M83` is an **error**, not a warning.
+  Firmware defaults to absolute extrusion when unspecified, so silence is not consent,
+  and a warning in a CLI scrolls past unread.
+
+### In progress (M3)
+Nothing implemented yet.
 
 ### Next concrete action
-Implement `GcodeScanner` — the first pass over an input file
-([ALGORITHM.md §9](ALGORITHM.md)). It needs no floating-point maths, no estimator and no
-database, which makes it the cheapest possible way to get real behaviour under test.
+Implement the estimator seam and flow aggregation ([ALGORITHM.md §4](ALGORITHM.md)):
 
-It must establish:
-1. **Extrusion mode** (`M82`/`M83`) — reject absolute with `Code::AbsoluteExtrusionUnsupported`.
-2. **Already-processed** detection via `kProcessedMarker` (`Version.hpp`).
-3. **Print body bounds** — note the emission asymmetry documented in
-   [legacy/algorithm-map.md](legacy/algorithm-map.md): the line marking the *start* is
-   part of the body; the line marking the *end* is not. Worth a dedicated test.
-4. **Slicer identity comments** (`printer_settings_id`, `filament_settings_id`,
-   `filament_type`) for profile auto-selection.
+1. **`IProcessRunner`** in `Ports.hpp`, with a real implementation in
+   `core/src/platform/` and a fake for tests. Pass an argument vector and capture stdout
+   directly — **not** through `cmd.exe` with shell redirection, which is how the legacy
+   acquired its "paths must not contain spaces" limitation
+   ([known-bugs.md #7](legacy/known-bugs.md)).
+2. **`MoveDumpParser`** — parse the estimator's `dump-moves` output into `MoveSample[]`.
+   Reproduce the retract state machine: negative flow zeroes the sample and arms a flag;
+   the *next* sample is also zeroed and disarms it.
+3. **`FlowAnalyzer`** — aggregate into one-second `FlowSecond` buckets carrying average
+   flow, max flow, and cumulative extruded filament.
 
-Synthetic fixtures are enough to build and test all of this — real sample G-code is not
-required until M3.
+**Record a real estimator output first** by running `bin/klipper_estimator.exe` against
+`testdata/reference/raw-basic.gcode`, and commit a trimmed version as a fixture. Every
+unit test then feeds the fake runner from that recording, so **no test spawns a
+subprocess** and the vendored binary is not a test dependency.
 
 ---
 

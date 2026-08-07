@@ -45,7 +45,8 @@ TEST_CASE("every code has a distinct stable name", "[diagnostics]")
     const Code all[] = {
         Code::Unknown,
         Code::FileNotFound, Code::FileUnreadable, Code::FileEmpty,
-        Code::AbsoluteExtrusionUnsupported, Code::AlreadyProcessed,
+        Code::AbsoluteExtrusionUnsupported, Code::ExtrusionModeUnknown,
+        Code::AlreadyProcessed,
         Code::PrintBodyNotFound,
         Code::ProfileNotFound, Code::ProfileInvalid,
         Code::FlowPointsNotIncreasing, Code::TemperaturePointsNotMonotonic,

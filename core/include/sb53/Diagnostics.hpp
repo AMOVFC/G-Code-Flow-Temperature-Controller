@@ -41,6 +41,14 @@ enum class Code {
     // silently produce garbage. The legacy did not check for this at all.
     AbsoluteExtrusionUnsupported,
 
+    // Neither M82 nor M83 appears, so relative extrusion cannot be confirmed.
+    //
+    // Treated as an error rather than a warning: firmware defaults to ABSOLUTE when
+    // unspecified, so proceeding risks producing a file that looks fine and prints
+    // badly. That silent-wrongness mode is the single worst outcome for this tool
+    // (legacy/known-bugs.md #9, #11), and a warning in a CLI scrolls past unread.
+    ExtrusionModeUnknown,
+
     // The file already carries our header marker. Re-processing would compound the
     // adjustments already applied.
     AlreadyProcessed,

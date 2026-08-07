@@ -6,6 +6,7 @@
 
 add_library(sb53_core STATIC
     src/Diagnostics.cpp
+    src/GcodeScanner.cpp
     src/Model.cpp
 )
 

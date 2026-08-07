@@ -39,6 +39,7 @@ std::string_view toString(Code c) noexcept
     case Code::FileEmpty:                    return "file-empty";
 
     case Code::AbsoluteExtrusionUnsupported: return "absolute-extrusion-unsupported";
+    case Code::ExtrusionModeUnknown:         return "extrusion-mode-unknown";
     case Code::AlreadyProcessed:             return "already-processed";
     case Code::PrintBodyNotFound:            return "print-body-not-found";
 

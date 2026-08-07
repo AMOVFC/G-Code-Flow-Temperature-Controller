@@ -24,10 +24,18 @@ include(Catch)
 add_executable(sb53_unit_tests
     unit/test_diagnostics.cpp
     unit/test_model.cpp
+    unit/test_scanner.cpp
 )
 
 target_link_libraries(sb53_unit_tests
     PRIVATE sb53::core sb53_warnings Catch2::Catch2WithMain
+)
+
+# Fixture location. Committed fixtures under testdata/fixtures/ are always present;
+# full-size files under testdata/reference/ are git-ignored, so tests using those must
+# skip gracefully when absent (see testdata/README.md).
+target_compile_definitions(sb53_unit_tests
+    PRIVATE SB53_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/testdata"
 )
 
 catch_discover_tests(sb53_unit_tests)
