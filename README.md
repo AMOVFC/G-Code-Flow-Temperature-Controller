@@ -312,16 +312,44 @@ them skip cleanly when absent. See [testdata/README.md](testdata/README.md).
 
 ### Verifying against the original tool
 
-The safest way to gain confidence before printing:
+The safest way to gain confidence before printing: process the same file with both tools
+and compare.
+
+**Option A — scripted**
+
+```powershell
+./tools/make-testpair.ps1 -InputFile C:\prints\benchy.gcode `
+    -Legacy "D:\SB53_G-Code_Flow_Temperature_Controller_V1.1" `
+    -Low 1 -Mid 80 -High 105 -LowTemp 220 -MidTemp 280 -HighTemp 310 `
+    -Rise 5 -Fall 1 -Smoothing 20 -Bias 7
+```
+
+Produces `<name>-RAW`, `<name>-OLD-legacy` and `<name>-NEW-flowtemp` in a `testpair`
+folder, then prints the temperature-curve and feedrate comparisons.
+
+Everything runs on **copies**. The legacy tool overwrites the file it is handed and
+deletes it if you close its window, so your original is never given to it directly.
+
+> The script tries to drive the old GUI automatically, and often **cannot** — it opens a
+> modal dialog and needs a real interactive desktop. When that happens it says so and
+> prints exactly what to do by hand. Add `-SkipLegacy` to not attempt it at all.
+
+**Option B — by hand**
 
 1. Slice a model and keep the raw G-code.
-2. Process one copy with the original `SB53-Systems.exe`, another with `flowtemp process`,
-   using the same calibration (remembering to invert the bias).
-3. `flowtemp compare old.gcode new.gcode` — expect correlation above 0.95.
-4. Print both and compare the results.
+2. Open `SB53-Systems.exe`, load the raw file, press PROCEED, save the result.
+3. Run `flowtemp process` on the same raw file with matching calibration —
+   **remembering to invert the bias** (a stored `SPEED_QUALITY_OPT` of 3 means `--bias 7`).
+4. `flowtemp compare old.gcode new.gcode` — expect correlation above 0.95.
+5. Print both and compare.
 
-> When capturing output from the original tool, **do not use its Save button** — it
-> deletes its own intermediate files.
+> ⚠️ **Check the legacy output actually contains `M104` commands.** If it has the
+> `; Edited by` header but no `M104`, it failed silently and the file is *not* processed
+> — see [known-bugs.md #11](docs/legacy/known-bugs.md). Do not print it, and do not use
+> it as a reference.
+
+> When capturing output from the original tool, **do not use its Close button** — it
+> deletes the input file when it was launched with a path argument.
 
 ## Known limitations
 
