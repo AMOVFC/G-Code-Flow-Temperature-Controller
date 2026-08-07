@@ -1,4 +1,4 @@
-# sb53_core — the headless engine.
+﻿# sb53_core - the headless engine.
 #
 # THE ONE RULE (ADR-0002): this target links nothing that knows a user exists.
 # No Qt, no windowing, no console I/O. It is verified by the `core-has-no-qt` test,
@@ -6,8 +6,10 @@
 
 add_library(sb53_core STATIC
     src/Diagnostics.cpp
+    src/FlowAnalysis.cpp
     src/GcodeScanner.cpp
     src/Model.cpp
+    src/platform/SubprocessRunner.cpp
 )
 
 target_include_directories(sb53_core

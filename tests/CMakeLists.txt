@@ -1,4 +1,4 @@
-include(FetchContent)
+﻿include(FetchContent)
 
 # Prefer an already-installed Catch2 so the build works offline; fall back to fetching
 # a pinned release.
@@ -23,6 +23,7 @@ include(Catch)
 
 add_executable(sb53_unit_tests
     unit/test_diagnostics.cpp
+    unit/test_flow.cpp
     unit/test_model.cpp
     unit/test_scanner.cpp
 )

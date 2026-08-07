@@ -5,8 +5,8 @@
 > even a short one. A stale STATE.md is worse than none.
 
 **Last updated:** 2026-08-07
-**Current milestone:** M2 — Data model + G-code scanner
-**Build status:** ✅ green — 8/8 tests passing (MSVC 19.44, Ninja, C++20)
+**Current milestone:** M4 — Temperature planner
+**Build status:** ✅ green — 22/22 tests passing (MSVC 19.44, Ninja, C++20)
 
 ## How to build
 
@@ -67,8 +67,8 @@ next until the current one's exit criteria are met and this file is updated.
 |---|---|---|---|
 | **M1** | **Foundations** — docs, ADRs, CMake skeleton, test harness | ✅ **done** | ~~Build and tests green; docs reviewed~~ |
 | **M2** | **Data model + G-code scanner** | ✅ **done** | ~~Scanner extracts markers, IDs, body bounds, M82/M83 guard from real files; unit tested~~ |
-| **M3** | **Estimator integration + flow aggregation** | 🟡 in progress | Per-second flow timeline produced from a recorded fixture, no live subprocess in tests |
-| M4 | Temperature planner | ⚪ not started | Blend → smooth → map → slew-limit, each unit tested; plan dumped as CSV |
+| **M3** | **Estimator integration + flow aggregation** | ✅ **done** | ~~Per-second flow timeline produced from a recorded fixture, no live subprocess in tests~~ |
+| **M4** | **Temperature planner** | 🟡 in progress | Blend → smooth → map → slew-limit, each unit tested; plan dumped as CSV |
 | M5 | G-code rewriter | ⚪ not started | Valid output G-code; feedrate clamp and PA gating verified |
 | M6 | CLI end-to-end | ⚪ not started | `sb53 process in.gcode` produces a printable file; **usable as an Orca post-processing script** |
 | M7 | Differential validation vs. legacy | ⚪ not started | Temperature curves track the legacy binary within tolerance on sample files |
@@ -133,27 +133,63 @@ all, and it is the artifact the future OrcaSlicer cloud plugin needs.
   Firmware defaults to absolute extrusion when unspecified, so silence is not consent,
   and a warning in a CLI scrolls past unread.
 
-### In progress (M3)
+- **M3 complete.** `IProcessRunner` + `SubprocessRunner` + `MoveDumpParser` +
+  `analyseFlow`; 22/22 tests green. Try it:
+  ```powershell
+  ./build/bin/sb53.exe analyze <your.gcode> --estimator bin/klipper_estimator.exe
+  ```
+
+  **Independent validation passed.** On a real 73k-line benchy the slicer declares
+  `; filament used [mm] = 3475.25`; we computed **3475.54 mm** by an unrelated route —
+  integrating volumetric flow over time and dividing by filament cross-section. 0.008%
+  apart, which cross-checks estimator parsing, retract suppression, time-weighted
+  integration and the volume-to-length conversion all at once.
+
+  Estimator output format, recorded as a fixture rather than guessed:
+  `Flow = Some(<double>)` / `Flow = None`, each followed by `Time = <double>`. Negative
+  flow is a retract; `None` is travel. Travel must **not** disarm the retract flag,
+  because travel happens between the retract and the unretract.
+
+> ⚠️ **`bin/config.json` does not match the printer these samples came from.**
+> The G-code requests `ACCEL=70000` and `SQUARE_CORNER_VELOCITY=12/15`; the config
+> declares `max_acceleration: 6000` and `square_corner_velocity: 5.0` — roughly 12x
+> slower. The estimator therefore predicts 13m 27s where the slicer says 7m 52s.
+>
+> This is not a defect in our code, but it **invalidates the analysis**: per-move timing
+> drives the flow curve, which drives the temperature plan. Anyone running with a
+> mismatched config gets a plausible-looking but wrong result, and may well explain some
+> of the difficulty in the 2026-08-06 session.
+>
+> **Planned diagnostic:** compare `SET_VELOCITY_LIMIT` values found in the G-code against
+> the loaded printer config and warn on significant mismatch. Cheap, and catches a silent
+> misconfiguration the legacy never mentioned. Needs `Code::PrinterConfigMismatch`.
+
+### In progress (M4)
 Nothing implemented yet.
 
 ### Next concrete action
-Implement the estimator seam and flow aggregation ([ALGORITHM.md §4](ALGORITHM.md)):
+Implement `TemperaturePlanner` ([ALGORITHM.md §5](ALGORITHM.md)). It is pure computation
+over `SourceAnalysis` — no I/O, no subprocess, no database — so it is entirely unit
+testable.
 
-1. **`IProcessRunner`** in `Ports.hpp`, with a real implementation in
-   `core/src/platform/` and a fake for tests. Pass an argument vector and capture stdout
-   directly — **not** through `cmd.exe` with shell redirection, which is how the legacy
-   acquired its "paths must not contain spaces" limitation
-   ([known-bugs.md #7](legacy/known-bugs.md)).
-2. **`MoveDumpParser`** — parse the estimator's `dump-moves` output into `MoveSample[]`.
-   Reproduce the retract state machine: negative flow zeroes the sample and arms a flag;
-   the *next* sample is also zeroed and disarms it.
-3. **`FlowAnalyzer`** — aggregate into one-second `FlowSecond` buckets carrying average
-   flow, max flow, and cumulative extruded filament.
+Four stages, each independently testable:
 
-**Record a real estimator output first** by running `bin/klipper_estimator.exe` against
-`testdata/reference/raw-basic.gcode`, and commit a trimmed version as a fixture. Every
-unit test then feeds the fake runner from that recording, so **no test spawns a
-subprocess** and the vendored binary is not a test dependency.
+1. **Blend** average and max flow by the Speed↔Quality bias. Linear interpolation, per
+   [ADR-0006](adr/0006-explainable-blend-and-smoothing.md) — a deliberate divergence from
+   the legacy's undocumented formula.
+2. **Smooth** with a centered moving average. At the ends the window clamps and the
+   divisor is the *actual* number of samples averaged, not the nominal width — otherwise
+   the first and last seconds are biased toward zero.
+3. **Map** flow to temperature via the three-point piecewise-linear calibration. Validate
+   `lowFlow < midFlow < highFlow` strictly: the inverse mapping divides by segment width,
+   so equal values are a division by zero (`Code::FlowPointsNotIncreasing` already
+   exists).
+4. **Slew-limit** to what the hotend can physically deliver. Asymmetric — heating is
+   driven, cooling is passive and slower.
+
+This needs `Profiles.hpp` first (`ExtruderProfile`, `FilamentProfile`), which does not
+exist yet. Define the structs only; `IProfileRepository` and SQLite can wait for M8 —
+hard-coded profiles are enough to reach an end-to-end CLI at M6.
 
 ---
 
