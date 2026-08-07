@@ -3,8 +3,8 @@
 
 > **This repository contains two implementations.**
 >
-> - **`sb53` (C++)** — an in-progress clean-room rewrite. Command-line only today, no GUI
->   yet. Build and usage instructions are immediately below.
+> - **`flowtemp.exe` (C++)** — an in-progress clean-room rewrite, with a local web
+>   interface. Build and usage instructions are immediately below.
 > - **The original Delphi application (V1.1)** — the released, GUI version. Its
 >   documentation begins at [Original Delphi Version](#original-delphi-version-v11).
 >
@@ -14,7 +14,13 @@
 
 ---
 
-# The C++ rewrite (`sb53`)
+# The C++ rewrite (`flowtemp.exe`)
+
+> **The two applications are named differently on purpose.** The original is
+> `SB53-Systems.exe`; this one is `flowtemp.exe`, and it announces itself as
+> "C++ Edition" in its output, its window title and the web page. They produce similar
+> files and only one of them has been validated by real prints — you should never be in
+> doubt about which you just opened.
 
 ## Status
 
@@ -25,7 +31,7 @@
 | Validated against the original tool | ✅ +0.9947 curve correlation |
 | **Validated by an actual print** | ❌ **not yet** |
 | Reads your existing `Config.sdb` profiles | ❌ not yet — calibration is entered by hand |
-| Graphical interface | ✅ local web UI (`sb53 serve`) |
+| Graphical interface | ✅ local web UI (`flowtemp serve`) |
 
 > ⚠️ **Do not run output from this on a printer unattended.** It has never been physically
 > validated. Compare against the original tool's output first, and watch the first print.
@@ -59,24 +65,38 @@ cd G-Code-Flow-Temperature-Controller
 ./tools/build.ps1
 ```
 
-The executable lands at **`build/bin/sb53.exe`**.
+The executable lands at **`build/bin/flowtemp.exe`**.
 
 Options: `-Clean` wipes the build directory, `-Config Debug` builds unoptimised,
 `-NoTests` skips the test run. On failure the script prints the compiler errors and
 writes a full log to `build/build.log`.
 
-### The motion estimator
+### The motion estimator — you do NOT run this yourself
 
-`sb53` does not compute kinematics itself. It calls **`klipper_estimator.exe`**, which is
-already in this repository at `bin/klipper_estimator.exe`.
+`flowtemp` does not compute kinematics itself; it calls **`klipper_estimator.exe`**. But it
+launches that automatically, as a subprocess, each time it processes a file.
 
-> This is a **custom fork**, not upstream Annex-Engineering. Do not substitute the
-> upstream build; the output format is not guaranteed to match.
+**There is no "run the estimator first" step.** One command does the whole job:
 
-Beside the estimator there must be a **`config.json`** describing your printer's motion
-limits. `sb53` looks for it next to whatever estimator you point it at.
+```powershell
+flowtemp process myprint.gcode      # runs the estimator internally, twice
+```
 
-## Configuring your printer
+Two things only have to *exist*:
+
+| | |
+|---|---|
+| `klipper_estimator.exe` | already in this repository, at `bin/klipper_estimator.exe` |
+| a `config.json` beside it | your printer's motion limits — **one-time setup**, see the next section |
+
+`flowtemp` looks for the estimator next to its own executable and then in `bin/`;
+`--estimator <path>` overrides that. It then looks for `config.json` in the same folder as
+whichever estimator it used.
+
+> The bundled estimator is a **custom fork**, not upstream Annex-Engineering. Do not
+> substitute the upstream build; its output format is not guaranteed to match.
+
+## Configuring your printer (one time)
 
 `config.json` tells the estimator how fast your machine can actually move. **Getting this
 wrong silently corrupts everything downstream** — move timing drives the flow curve, which
@@ -103,7 +123,7 @@ Map your Klipper settings across:
 A worked example for a CoreXY Voron-derived machine is in
 [`testdata/printer-configs/awd-v0.json`](testdata/printer-configs/awd-v0.json).
 
-> **Sanity check:** run `sb53 analyze` and compare its estimated time against your
+> **Sanity check:** run `flowtemp analyze` and compare its estimated time against your
 > slicer's. They should be within roughly 10%. If the tool reports far longer, your
 > `config.json` understates the machine's real limits.
 
@@ -177,7 +197,7 @@ validated.
 > ⚠️ **Pick the threshold from your actual layer times, not by feel.** A Benchy at 8
 > minutes over 192 layers averages ~2.5 s per layer, so `--cool-below 15` cools
 > essentially the whole print and degenerates into a flat temperature offset. Run
-> `sb53 serve` and look at the layer-timing chart, or check `median layer time` in the
+> `flowtemp serve` and look at the layer-timing chart, or check `median layer time` in the
 > web UI's statistics. For small models 3–5 s is usually the useful range.
 
 ## Using it
@@ -185,7 +205,7 @@ validated.
 ### The web interface (easiest)
 
 ```powershell
-./build/bin/sb53.exe serve
+./build/bin/flowtemp.exe serve
 ```
 
 Then open **http://127.0.0.1:8765** in your browser.
@@ -207,7 +227,7 @@ number from evidence instead of guessing.
 ### Inspect a file — changes nothing
 
 ```powershell
-./build/bin/sb53.exe scan myprint.gcode
+./build/bin/flowtemp.exe scan myprint.gcode
 ```
 
 Reports extrusion mode, print-body bounds, detected printer/filament profiles, and
@@ -216,7 +236,7 @@ whether the file has already been processed.
 ### Analyse flow and preview the temperature plan — changes nothing
 
 ```powershell
-./build/bin/sb53.exe analyze myprint.gcode --estimator bin/klipper_estimator.exe `
+./build/bin/flowtemp.exe analyze myprint.gcode --estimator bin/klipper_estimator.exe `
     --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 `
     --smoothing 20 --bias 7 --rise 5 --fall 1
 ```
@@ -228,7 +248,7 @@ anything.**
 ### Process a file
 
 ```powershell
-./build/bin/sb53.exe process myprint.gcode --out processed.gcode `
+./build/bin/flowtemp.exe process myprint.gcode --out processed.gcode `
     --estimator bin/klipper_estimator.exe `
     --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 `
     --smoothing 20 --bias 7 --rise 5 --fall 1
@@ -242,7 +262,7 @@ can never leave a half-written file where your input was.
 ### Compare two processed files
 
 ```powershell
-./build/bin/sb53.exe compare old.gcode new.gcode
+./build/bin/flowtemp.exe compare old.gcode new.gcode
 ```
 
 Extracts the commanded temperature sequence from each, indexes both by cumulative
@@ -261,10 +281,11 @@ Errors carry a stable machine-readable code alongside the message, e.g.
 In OrcaSlicer, *Print Settings → Others → Post-processing Scripts*:
 
 ```
-"C:\path\to\build\bin\sb53.exe" process --estimator "C:\path\to\bin\klipper_estimator.exe" --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 --smoothing 20 --bias 7 --rise 5 --fall 1
+"C:\path\to\build\bin\flowtemp.exe" process --estimator "C:\path\to\bin\klipper_estimator.exe" --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 --smoothing 20 --bias 7 --rise 5 --fall 1
 ```
 
-The slicer appends the G-code path, which `sb53` overwrites in place.
+The slicer appends the G-code path, which `flowtemp` overwrites in place. The estimator
+runs inside that call — nothing else to configure in the slicer.
 
 **Requirements**, all enforced with a clear error rather than silently producing bad
 output:
@@ -294,9 +315,9 @@ them skip cleanly when absent. See [testdata/README.md](testdata/README.md).
 The safest way to gain confidence before printing:
 
 1. Slice a model and keep the raw G-code.
-2. Process one copy with the original `SB53-Systems.exe`, another with `sb53 process`,
+2. Process one copy with the original `SB53-Systems.exe`, another with `flowtemp process`,
    using the same calibration (remembering to invert the bias).
-3. `sb53 compare old.gcode new.gcode` — expect correlation above 0.95.
+3. `flowtemp compare old.gcode new.gcode` — expect correlation above 0.95.
 4. Print both and compare the results.
 
 > When capturing output from the original tool, **do not use its Save button** — it

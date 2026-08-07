@@ -39,7 +39,7 @@ constexpr std::string_view kPage = R"HTML(<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>G-Code Flow &amp; Temperature Controller</title>
+<title>Flow&amp;Temp (C++) &mdash; G-Code Controller</title>
 <style>
 :root{color-scheme:light dark;--bg:#fbfbfc;--panel:#fff;--ink:#1a1c20;--muted:#6b7280;
 --line:#e3e5e9;--accent:#2563eb;--warn:#b45309;--err:#b91c1c;--ok:#15803d;
@@ -94,6 +94,7 @@ margin-right:5px}
 <header>
   <h1>G-Code Flow &amp; Temperature Controller</h1>
   <span class="ver" id="ver"></span>
+  <span class="ver">C++ Edition &mdash; not the original SB53-Systems app</span>
   <span class="warn">Not yet validated by test prints &mdash; check output before printing</span>
 </header>
 <main>
