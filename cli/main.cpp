@@ -14,6 +14,8 @@
 #include "sb53/TemperaturePlanner.hpp"
 #include "sb53/Version.hpp"
 
+#include "WebUI.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -32,6 +34,7 @@ int printUsage()
         "%s %s\n"
         "\n"
         "Usage:\n"
+        "  sb53 serve [--port 8765]                    open the web interface\n"
         "  sb53 scan <input.gcode>                     inspect a file, change nothing\n"
         "  sb53 analyze <input.gcode> [--estimator P]  flow analysis, change nothing\n"
         "  sb53 process <input.gcode> [--out <path>]   process a G-code file\n"
@@ -655,6 +658,19 @@ int main(int argc, char** argv)
         const auto exeDir =
             std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
         return runAnalyze(args[1], estimator, exeDir, extruder, filament);
+    }
+
+    if (args[0] == "serve") {
+        unsigned short port = 8765;
+        for (std::size_t i = 1; i + 1 < args.size(); ++i) {
+            if (args[i] == "--port") {
+                port = static_cast<unsigned short>(std::stoi(std::string(args[i + 1])));
+            }
+        }
+        std::error_code ec;
+        const auto exeDir =
+            std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
+        return sb53::web::runServe(port, exeDir, findEstimator);
     }
 
     if (args[0] == "compare") {

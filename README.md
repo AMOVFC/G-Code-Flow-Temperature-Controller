@@ -24,8 +24,8 @@
 | Command-line tool | ✅ working |
 | Validated against the original tool | ✅ +0.9947 curve correlation |
 | **Validated by an actual print** | ❌ **not yet** |
-| Reads your existing `Config.sdb` profiles | ❌ not yet — calibration is passed on the command line |
-| Graphical interface | ❌ not yet |
+| Reads your existing `Config.sdb` profiles | ❌ not yet — calibration is entered by hand |
+| Graphical interface | ✅ local web UI (`sb53 serve`) |
 
 > ⚠️ **Do not run output from this on a printer unattended.** It has never been physically
 > validated. Compare against the original tool's output first, and watch the first print.
@@ -132,6 +132,8 @@ between them.
 | `--fall` | how fast it **cools**, °C per second — usually much slower |
 | `--smoothing` | averaging window in seconds; 10–30 recommended |
 | `--bias` | **0 = quality, 10 = most aggressive** (see below) |
+| `--cool-below` / `--cool-drop` | fast-layer cooling (see below); `--cool-drop 0` disables |
+| `--adjust-pa` | enable pressure-advance adjustment (Klipper only) |
 | `--start-macro` / `--temp-token` | start-macro name and the parameter to rewrite (defaults `PRINT_START` / `EXTRUDER_TEMP`) |
 
 Flow points must be **strictly increasing** (`low < mid < high`) — the tool refuses
@@ -155,7 +157,52 @@ Calibrating the three points is unchanged from the original tool; the visual met
 described under [Ideal Flow/Temperature Calibration](#ideal-flowtemperature-calibration)
 below.
 
+### Fast-layer cooling
+
+**New in the rewrite — the original tool has no equivalent.**
+
+On small or fast layers the previous layer has not set before the next lands on top of
+it, so it sags and loses definition — the classic drooping chimney on a Benchy. Slicers
+handle this by slowing down; this lowers the nozzle temperature instead, which stiffens
+the extrudate sooner without costing as much time.
+
+- `--cool-below <seconds>` — layers at or above this get no reduction.
+- `--cool-drop <°C>` — the reduction at zero layer time, ramping linearly up to the
+  threshold.
+
+Off by default, because it changes printed output. The reduction is always clamped to
+your calibrated low temperature — cooling never takes the nozzle somewhere you have not
+validated.
+
+> ⚠️ **Pick the threshold from your actual layer times, not by feel.** A Benchy at 8
+> minutes over 192 layers averages ~2.5 s per layer, so `--cool-below 15` cools
+> essentially the whole print and degenerates into a flat temperature offset. Run
+> `sb53 serve` and look at the layer-timing chart, or check `median layer time` in the
+> web UI's statistics. For small models 3–5 s is usually the useful range.
+
 ## Using it
+
+### The web interface (easiest)
+
+```powershell
+./build/bin/sb53.exe serve
+```
+
+Then open **http://127.0.0.1:8765** in your browser.
+
+Everything is on one page: paste in a G-code path, set your calibration, press **Analyse**
+to see the flow curve, the resulting temperature curve, and a per-layer timing chart —
+then **Process & write** when it looks right.
+
+The layer-timing chart is the point of the page. It shows how long every layer takes and
+highlights which ones fall under your fast-layer cooling threshold, so you can pick that
+number from evidence instead of guessing.
+
+> The server binds to **loopback only** and is not reachable from your network. It is
+> still a local process that reads and writes files anywhere you can, so do not expose the
+> port.
+
+`--port 8765` changes the port. Ctrl+C stops it.
 
 ### Inspect a file — changes nothing
 
@@ -257,8 +304,9 @@ The safest way to gain confidence before printing:
 
 ## Known limitations
 
-- No GUI yet; command line only.
-- Profiles are not read from `Config.sdb` yet.
+- Profiles are not read from `Config.sdb` yet — calibration is entered by hand.
+- The web UI takes a file **path**; there is no file picker, because a browser cannot
+  hand a server a local path.
 - Windows only. The core library is portable and builds on Linux, but process execution is
   not implemented there yet.
 - Multi-tool and multi-material printing are not supported.

@@ -1,4 +1,8 @@
-add_executable(sb53-cli main.cpp)
+add_executable(sb53-cli
+    main.cpp
+    HttpServer.cpp
+    WebUI.cpp
+)
 
 target_link_libraries(sb53-cli
     PRIVATE sb53::core sb53_warnings
