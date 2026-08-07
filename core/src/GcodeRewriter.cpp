@@ -331,7 +331,20 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
         }
 
         // --- an extruding move ----------------------------------------------
-        if (isMove && e.has_value() && *e > 0.0) {
+        //
+        // "Extruding" requires actual travel. A positive E with no X/Y is an unretract
+        // or a prime, which pushes filament back into the nozzle rather than laying it
+        // down.
+        //
+        // This must match the analyser exactly. MoveDumpParser zeroes both the retract
+        // and its matching unretract, so if the rewriter counted unretracts its filament
+        // coordinate would run ahead of the plan's -- and since the plan holds its last
+        // value past the end, temperature commands would silently stop partway through
+        // the print. Differential comparison against the legacy caught precisely that:
+        // the plan covered 3475 mm while the rewriter had already reached 5616 mm.
+        const bool travels = word(line, 'X').has_value() || word(line, 'Y').has_value();
+
+        if (isMove && travels && e.has_value() && *e > 0.0) {
             usedFilament += *e;
 
             if (const auto planned =

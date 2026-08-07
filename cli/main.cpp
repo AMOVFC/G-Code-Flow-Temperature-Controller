@@ -5,6 +5,7 @@
 // a future web backend will invoke. It reaches full capability at milestone M6, before
 // the Qt GUI starts at M8. See ADR-0002.
 
+#include "sb53/CurveCompare.hpp"
 #include "sb53/Diagnostics.hpp"
 #include "sb53/FlowAnalysis.hpp"
 #include "sb53/GcodeRewriter.hpp"
@@ -34,6 +35,7 @@ int printUsage()
         "  sb53 scan <input.gcode>                     inspect a file, change nothing\n"
         "  sb53 analyze <input.gcode> [--estimator P]  flow analysis, change nothing\n"
         "  sb53 process <input.gcode> [--out <path>]   process a G-code file\n"
+        "  sb53 compare <a.gcode> <b.gcode>            compare two temperature curves\n"
         "  sb53 --version                              print version and exit\n"
         "  sb53 --help                                 print this message\n"
         "\n"
@@ -249,6 +251,75 @@ int runAnalyze(std::string_view path, std::filesystem::path estimator,
                     std::string(static_cast<std::size_t>(bars), '#').c_str());
     }
 
+    return 0;
+}
+
+// Differential verification (ADR-0005). Compares the SHAPE of two temperature curves,
+// not their values: calibration profiles may differ, the blend formula was deliberately
+// changed, and several legacy defects are fixed. What must agree is whether temperature
+// rises and falls at the same points in the print.
+int runCompare(std::string_view pathA, std::string_view pathB)
+{
+    const auto load = [](std::string_view p, std::vector<sb53::TemperaturePoint>& out) {
+        std::ifstream in{std::string(p), std::ios::binary};
+        if (!in) {
+            std::fprintf(stderr, "error: cannot open '%s'\n", std::string(p).c_str());
+            return false;
+        }
+        out = sb53::extractTemperatureCurve(in);
+        if (out.empty()) {
+            std::fprintf(stderr,
+                         "error: '%s' contains no temperature commands. If it carries a\n"
+                         "       processed marker but no M104, it is a silent failure.\n",
+                         std::string(p).c_str());
+            return false;
+        }
+        return true;
+    };
+
+    std::vector<sb53::TemperaturePoint> a;
+    std::vector<sb53::TemperaturePoint> b;
+    if (!load(pathA, a) || !load(pathB, b)) {
+        return 1;
+    }
+
+    const auto c = sb53::compareCurves(a, b);
+
+    const auto show = [](const char* label, std::string_view path,
+                         const sb53::CurveStats& s) {
+        std::printf("%s %s\n", label, std::string(path).c_str());
+        std::printf("     %zu commands, %.1f - %.1f C (mean %.1f), over %.0f mm filament\n",
+                    s.points, s.minimum, s.maximum, s.mean, s.span);
+    };
+    show("A:", pathA, c.a);
+    show("B:", pathB, c.b);
+
+    if (c.samples == 0) {
+        std::fprintf(stderr,
+                     "\nerror: the two files share no overlapping filament range, so "
+                     "they cannot be\n       compared. Are they the same print?\n");
+        return 1;
+    }
+
+    std::printf("\ncomparison over %zu samples of the shared range:\n", c.samples);
+    std::printf("  correlation    : %+.4f\n", c.correlation);
+    std::printf("  RMS difference : %.2f C   (after removing each curve's mean)\n",
+                c.rmsDifference);
+    std::printf("  max difference : %.2f C\n", c.maxDifference);
+    std::printf("  mean offset    : %+.2f C  (expected when calibration differs)\n",
+                c.meanOffset);
+
+    // Thresholds are judgement calls, stated openly rather than hidden in a pass/fail.
+    std::printf("\n  ");
+    if (c.correlation >= 0.8) {
+        std::printf("STRONG agreement - both tools move temperature together.\n");
+    } else if (c.correlation >= 0.5) {
+        std::printf("MODERATE agreement - same broad trend, notable local differences.\n");
+    } else if (c.correlation >= 0.0) {
+        std::printf("WEAK agreement - worth investigating before trusting the output.\n");
+    } else {
+        std::printf("INVERTED - the curves move in opposite directions. This is a bug.\n");
+    }
     return 0;
 }
 
@@ -562,6 +633,14 @@ int main(int argc, char** argv)
         const auto exeDir =
             std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
         return runAnalyze(args[1], estimator, exeDir, extruder, filament);
+    }
+
+    if (args[0] == "compare") {
+        if (args.size() < 3) {
+            std::fprintf(stderr, "error: compare requires two processed G-code files\n");
+            return 64;
+        }
+        return runCompare(args[1], args[2]);
     }
 
     if (args[0] == "process") {

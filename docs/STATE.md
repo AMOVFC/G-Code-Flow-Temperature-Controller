@@ -5,8 +5,8 @@
 > even a short one. A stale STATE.md is worse than none.
 
 **Last updated:** 2026-08-07
-**Current milestone:** M7 — Differential validation
-**Build status:** ✅ green — 42/42 tests passing (MSVC 19.44, Ninja, C++20)
+**Current milestone:** M8 — Profile database, then Qt frontend
+**Build status:** ✅ green — 48/48 tests passing (MSVC 19.44, Ninja, C++20)
 
 > **The tool works end to end.** `sb53 process` produces a real, valid output file.
 > See "Using it" below.
@@ -74,8 +74,8 @@ next until the current one's exit criteria are met and this file is updated.
 | **M4** | **Temperature planner** | ✅ **done** | ~~Blend → smooth → map → slew-limit, each unit tested~~ |
 | **M5** | **G-code rewriter** | ✅ **done** | ~~Valid output G-code; feedrate clamp and PA gating verified~~ |
 | **M6** | **CLI end-to-end** | ✅ **done** | ~~`sb53 process in.gcode` produces a printable file~~ |
-| **M7** | **Differential validation vs. legacy** | 🟡 in progress | Temperature curves track the legacy binary within tolerance on sample files |
-| M8 | Qt frontend | ⚪ not started | Feature parity with the legacy UI, restructured per ARCHITECTURE.md |
+| **M7** | **Differential validation vs. legacy** | ✅ **done** | ~~Temperature curves track the legacy binary within tolerance~~ — correlation **+0.867** |
+| **M8** | **Profile database + Qt frontend** | 🟡 in progress | Reads the existing `Config.sdb`; UI parity, restructured per ARCHITECTURE.md |
 | M9 | Physical validation | ⚪ not started | Test prints succeed on real hardware |
 
 **M6 is the real milestone.** At that point the tool is genuinely useful with no GUI at
@@ -218,27 +218,56 @@ all, and it is the artifact the future OrcaSlicer cloud plugin needs.
 Omit `--out` to overwrite in place, which is what a slicer post-processing hook expects.
 Calibration flags are placeholders until the profile database lands at M8.
 
-### In progress (M7)
+- **M7 complete, and it earned its keep.** `sb53 compare` extracts the commanded
+  temperature sequence from two processed files, indexes both by cumulative extruded
+  filament, resamples onto a shared grid, and reports correlation plus mean-removed
+  differences.
+
+  **A matched pair was identified by fingerprinting the move sequence:**
+  `fixingfix3799_PLA_7m19s.gcode` (raw) is the source of `..._7m27s.gcode` (legacy
+  output) — identical 51,240-move hash. The tool does not alter `G1 X/Y/E` lines, so that
+  hash is a reliable way to pair a processed file with its input.
+
+  **The first comparison immediately found a real bug.** Correlation was only **+0.4455**,
+  and the diagnostic was in the spans: the legacy curve covered 5616 mm of filament while
+  ours stopped at 3475 mm on the same print.
+
+  Cause: `MoveDumpParser` zeroes both the retract and its matching unretract, but
+  `GcodeRewriter` was accumulating *any* positive `E` — including unretract moves like
+  `G1 E2 F1800`. The rewriter's coordinate therefore ran ahead of the plan's, and since
+  the plan holds its last value past the end, **temperature commands silently stopped
+  partway through the print.** No crash, no warning — exactly the failure class this
+  project exists to eliminate.
+
+  Fix: only accumulate `E` on moves that actually travel (have `X` or `Y`). Result:
+
+  | | before | after |
+  |---|---|---|
+  | correlation | +0.4455 (weak) | **+0.8672 (strong)** |
+  | max difference | 28.90 °C | 13.17 °C |
+  | mean offset | +3.50 °C | +0.97 °C |
+
+  A regression test pins it, and the comment explains the coupling so nobody "optimises"
+  the two accumulators back out of agreement.
+
+### In progress (M8)
 Nothing implemented yet.
 
 ### Next concrete action
-Differential validation against the legacy binary
-([ADR-0005](adr/0005-differential-verification.md)).
+Two pieces, in this order:
 
-`testdata/reference/legacy-out-speeds.gcode` is a **confirmed-good** legacy output (410
-`M104`, 227.6–270.6 °C, 5207 speed reductions) — the strongest reference available. Its
-raw counterpart is not in the set, so generate matched pairs by running
-`bin/SB53-Systems.exe` directly: given a G-code path as `argv[1]` it processes the file
-with no user interaction.
+1. **`SqliteProfileRepository`** — vendor the SQLite amalgamation and read the existing
+   `Config.sdb` schema unchanged ([ADR-0003](adr/0003-sqlite-in-core.md)). This removes
+   the CLI's hard-coded calibration placeholders, which is the last thing standing
+   between the tool and real use. Auto-select by matching the G-code's
+   `printer_settings_id` / `filament_settings_id`, and **say so when falling back** —
+   the legacy silently used row 0.
+2. **Qt 6 frontend** ([ADR-0002](adr/0002-core-ui-separation.md), and
+   [ADR-0004](adr/0004-custom-chart-widget.md) for the chart).
 
-Extract the commanded temperature sequence from both outputs and compare as **curves**,
-not values — the blend formula was deliberately changed ([ADR-0006](adr/0006-explainable-blend-and-smoothing.md))
-and several legacy defects are fixed, so exact agreement is neither expected nor wanted.
-What this catches is misunderstanding the algorithm: a curve trending the wrong way,
-saturating, or phase-shifted.
-
-> Do not use the legacy's Save action when capturing — it deletes its own intermediate
-> files, which are the interesting comparison points.
+> Worth doing early in M8: the printer-config mismatch diagnostic noted above. Comparing
+> the G-code's `SET_VELOCITY_LIMIT` values against the loaded `config.json` would have
+> flagged the 12x acceleration discrepancy immediately.
 
 ---
 

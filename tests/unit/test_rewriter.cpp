@@ -301,6 +301,58 @@ TEST_CASE("retractions keep the slicer's feedrate", "[rewriter]")
     CHECK(contains(out, "G1 E-2 F1800"));
 }
 
+TEST_CASE("unretracts do not advance the filament coordinate", "[rewriter][safety]")
+{
+    // Regression: the rewriter's filament counter MUST track the analyser's exactly.
+    //
+    // MoveDumpParser zeroes both the retract and its matching unretract, so counting
+    // unretracts here makes the rewriter run ahead of the plan. Because the plan holds
+    // its last value past the end, the symptom is not a crash but silence -- temperature
+    // commands stop partway through the print and everything after runs at a fixed
+    // temperature.
+    //
+    // Differential comparison against the legacy caught this: the plan spanned 3475 mm
+    // while the rewriter had already reached 5616 mm on the same file.
+
+    const std::string_view source =
+        "M83\n"
+        ";HEIGHT:0.25\n"
+        ";WIDTH:0.5\n"
+        "G1 X10 Y10 E1.0\n"    // real extrusion: counts
+        "G1 E-2 F1800\n"       // retract: must not count
+        "G1 E2 F1800\n"        // unretract: must not count either
+        "G1 X20 Y20 E1.0\n"    // real extrusion: counts
+        "; EXECUTABLE_BLOCK_END\n";
+
+    DiagnosticList d;
+    NullProgressSink p;
+
+    std::istringstream scanIn{std::string(source)};
+    const auto scan = GcodeScanner::scan(scanIn, d);
+
+    SourceAnalysis analysis;
+    // The plan covers exactly 2 mm -- the true extrusion. If unretracts were counted the
+    // rewriter would reach 4 mm and fall off the end.
+    analysis.seconds = {FlowSecond{1.0, 5.0, 6.0, 1.0},
+                        FlowSecond{2.0, 5.0, 6.0, 2.0}};
+
+    TemperaturePlan plan;
+    plan.achievableTemperature = {200.0, 230.0};
+    plan.initialTemperature = 200.0;
+    plan.minTemperature = 200.0;
+    plan.maxTemperature = 230.0;
+
+    std::istringstream in{std::string(source)};
+    std::ostringstream out;
+    const auto stats = rewriteGcode(in, out, scan, analysis, plan, testExtruder(),
+                                    testFilament(), d, p, {});
+
+    // The second real extrusion lands at 2 mm, the top of the plan, so the temperature
+    // must reach 230 -- not be stuck at whatever the coordinate overshot to.
+    CHECK(contains(out.str(), "M104 S230"));
+    CHECK(stats.temperatureCommands >= 2);
+}
+
 TEST_CASE("pressure advance is gated by feature and by profile", "[rewriter][pa]")
 {
     Harness h;

@@ -5,6 +5,7 @@
 # not merely by convention.
 
 add_library(sb53_core STATIC
+    src/CurveCompare.cpp
     src/Diagnostics.cpp
     src/FlowAnalysis.cpp
     src/GcodeRewriter.cpp
