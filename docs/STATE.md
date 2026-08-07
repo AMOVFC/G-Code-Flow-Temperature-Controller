@@ -250,8 +250,41 @@ Calibration flags are placeholders until the profile database lands at M8.
   A regression test pins it, and the comment explains the coupling so nobody "optimises"
   the two accumulators back out of agreement.
 
+- **Validated against the user's real setup (2026-08-07).** Their actual profile database
+  was located at `D:\SB53_G-Code_Flow_Temperature_Controller_V1.1\Config\Config.sdb` and
+  dumped with `tools/dump-profiles.py`.
+
+  Real calibration for `"Elegoo HS PLA+ awd hott"`: flow **1 / 80 / 105** mm³/s →
+  **220 / 280 / 310** °C, `A_M_SMOOTH` 20, `ADJUST_PA` 0, `SPEED_QUALITY_OPT` 3.
+  Extruder `awd v0`: rise 5 °C/s, fall **1 °C/s** (cooling five times slower than
+  heating — exactly the asymmetry the slew limiter models).
+
+  With that calibration and the printer config taken from `EXTRUDER.PRINTER_CONFIG`:
+
+  ```
+  correlation    : +0.9947
+  RMS difference : 0.88 C
+  max difference : 2.96 C
+  mean offset    : -0.24 C
+  ```
+
+  Temperature range came out **227.6 – 270.6 °C, start 228.3** — identical to the legacy
+  output to one decimal.
+
+  **Two corrections to earlier conclusions, recorded so they are not repeated:**
+  1. The "printer config is 12x wrong" finding applies only to the stale bundled
+     `bin/config.json`. The legacy stores the real config in `EXTRUDER.PRINTER_CONFIG` and
+     writes it out on extruder selection, so actual legacy runs used
+     `max_acceleration: 150000` — not 6000. The planned mismatch diagnostic is still worth
+     having, but it is not the cause of anything observed.
+  2. The Speed↔Quality scale is **inverted** relative to ours — see the addendum in
+     [ADR-0006](adr/0006-explainable-blend-and-smoothing.md). Importing
+     `SPEED_QUALITY_OPT` directly would produce prints ~14 °C colder than the user
+     expects, silently.
+
 ### In progress (M8)
-Nothing implemented yet.
+Nothing implemented yet. `tools/dump-profiles.py` reads the schema today; the C++
+`SqliteProfileRepository` is still to be written, and **must invert the bias on import**.
 
 ### Next concrete action
 Two pieces, in this order:

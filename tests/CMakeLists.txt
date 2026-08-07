@@ -1,5 +1,6 @@
 ﻿include(FetchContent)
 
+
 # Prefer an already-installed Catch2 so the build works offline; fall back to fetching
 # a pinned release.
 set(FETCHCONTENT_TRY_FIND_PACKAGE_MODE OPT_IN)

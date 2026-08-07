@@ -61,3 +61,39 @@ a sanity check.
 - Physical testing (M9) shows the legacy's behaviour is materially better at some
   setting. In that case, characterise *why* and document the finding — do not simply copy
   the expression back.
+
+---
+
+## Addendum (2026-08-07): the legacy scale is INVERTED
+
+Differential comparison against a known-good legacy output established this empirically.
+
+The user's database stores `SPEED_QUALITY_OPT = 3`. Reproducing that run with our bias
+set to **7** — not 3 — gives near-exact agreement:
+
+| our bias | correlation | mean offset | RMS |
+|---:|---:|---:|---:|
+| 3 | +0.9542 | +14.22 °C | 3.14 °C |
+| 5 | +0.9908 | +7.00 °C | 1.65 °C |
+| **7** | **+0.9947** | **−0.24 °C** | **0.88 °C** |
+| 10 | +0.9775 | −11.19 °C | 2.80 °C |
+
+So the legacy's scale runs **0 = Speed, 10 = Quality**, the opposite of ours.
+
+**Decision: keep our direction, and invert on import.** `0 = Quality, 10 = Speed` matches
+how the README describes the control and is the more natural reading of a
+"Speed ↔ Quality" slider. But any code reading the legacy schema **must** apply:
+
+```
+ourBias = 10 - storedSpeedQualityOpt
+```
+
+This is not cosmetic. Importing the stored value directly would have produced prints
+**~14 °C colder** than the user is accustomed to, with no error and no warning — the same
+class of silent wrongness catalogued in [known-bugs.md](../legacy/known-bugs.md). The
+`SqliteProfileRepository` must invert, and it needs a test that pins the direction.
+
+Note also that the legacy's own writer is buggy here: it persists `SPEED_QUALITY_OPT` from
+the wrong control entirely ([known-bugs.md #1](../legacy/known-bugs.md)), so a stored value
+may reflect a design-time default rather than anything the user chose. Treat imported
+values as a starting point to confirm with the user, not as ground truth.
