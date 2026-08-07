@@ -164,6 +164,106 @@ double temperatureToPressureAdvance(const FilamentProfile& f, Celsius temperatur
                 fraction(temperature, f.midTemp, f.highTemp));
 }
 
+// ---------------------------------------------------------------------------
+// Layer-time cooling (ALGORITHM.md §5.5)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Elapsed time at a given cumulative-filament position, by linear interpolation between
+// the surrounding per-second samples.
+[[nodiscard]] Seconds timeAtFilament(const std::vector<FlowSecond>& seconds,
+                                     Millimetres usedFilament) noexcept
+{
+    if (seconds.empty()) {
+        return 0.0;
+    }
+    if (usedFilament <= seconds.front().usedFilament) {
+        return 0.0;
+    }
+    if (usedFilament >= seconds.back().usedFilament) {
+        return seconds.back().time;
+    }
+
+    const auto it = std::lower_bound(
+        seconds.begin(), seconds.end(), usedFilament,
+        [](const FlowSecond& s, Millimetres v) { return s.usedFilament < v; });
+
+    if (it == seconds.begin()) {
+        return it->time;
+    }
+
+    const auto& hi = *it;
+    const auto& lo = *(it - 1);
+    const double gap = hi.usedFilament - lo.usedFilament;
+    if (!(gap > 0.0)) {
+        return hi.time;
+    }
+    // Interpolate: a layer boundary rarely lands exactly on a one-second sample, and
+    // rounding to the nearest would quantise short layers to 0 or 1 s.
+    const double t = (usedFilament - lo.usedFilament) / gap;
+    return lo.time + (hi.time - lo.time) * t;
+}
+
+} // namespace
+
+std::vector<Seconds> computeLayerDurations(const std::vector<LayerMark>& layers,
+                                           const std::vector<FlowSecond>& seconds)
+{
+    std::vector<Seconds> durations(layers.size(), 0.0);
+    if (layers.empty() || seconds.empty()) {
+        return durations;
+    }
+
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        const double start = timeAtFilament(seconds, layers[i].usedFilament);
+        const double end = (i + 1 < layers.size())
+                               ? timeAtFilament(seconds, layers[i + 1].usedFilament)
+                               : seconds.back().time;
+        durations[i] = std::max(0.0, end - start);
+    }
+    return durations;
+}
+
+Celsius coolingDropForLayerTime(Seconds layerTime, Seconds thresholdSeconds,
+                                Celsius maxDrop) noexcept
+{
+    if (!(thresholdSeconds > 0.0) || !(maxDrop > 0.0)) {
+        return 0.0;
+    }
+    if (layerTime >= thresholdSeconds) {
+        return 0.0;   // slow enough to set on its own
+    }
+    if (layerTime <= 0.0) {
+        return maxDrop;
+    }
+    // Linear ramp: the shorter the layer, the less time it has to solidify.
+    return maxDrop * (1.0 - layerTime / thresholdSeconds);
+}
+
+std::vector<Celsius> layerCoolingProfile(const std::vector<LayerMark>& layers,
+                                         const std::vector<FlowSecond>& seconds,
+                                         Seconds thresholdSeconds, Celsius maxDrop)
+{
+    std::vector<Celsius> drops(seconds.size(), 0.0);
+    if (layers.empty() || seconds.empty() || !(maxDrop > 0.0)) {
+        return drops;
+    }
+
+    const auto durations = computeLayerDurations(layers, seconds);
+
+    // Walk the timeline once, advancing the layer cursor by filament position.
+    std::size_t layer = 0;
+    for (std::size_t i = 0; i < seconds.size(); ++i) {
+        while (layer + 1 < layers.size() &&
+               seconds[i].usedFilament >= layers[layer + 1].usedFilament) {
+            ++layer;
+        }
+        drops[i] = coolingDropForLayerTime(durations[layer], thresholdSeconds, maxDrop);
+    }
+    return drops;
+}
+
 std::vector<Celsius> applySlewLimit(std::span<const Celsius> desired,
                                     double riseRatePerSecond,
                                     double fallRatePerSecond,
@@ -205,7 +305,8 @@ TemperaturePlan planTemperature(const SourceAnalysis& analysis,
                                 const ExtruderProfile& extruder,
                                 const FilamentProfile& filament,
                                 DiagnosticList& diagnostics,
-                                const PlannerOptions& options)
+                                const PlannerOptions& options,
+                                const std::vector<LayerMark>& layers)
 {
     TemperaturePlan plan;
 
@@ -246,6 +347,32 @@ TemperaturePlan planTemperature(const SourceAnalysis& analysis,
     plan.desiredTemperature.resize(n);
     for (std::size_t i = 0; i < n; ++i) {
         plan.desiredTemperature[i] = flowToTemperature(filament, plan.smoothedFlow[i]);
+    }
+
+    // --- 3b. layer-time cooling ---------------------------------------------
+    //
+    // Applied to the DESIRED curve, before slew limiting, so the reduction is subject to
+    // the same physical rate limits as everything else. Applying it afterwards would
+    // command drops the hotend cannot actually achieve.
+    if (extruder.layerCoolingEnabled()) {
+        if (layers.empty()) {
+            diagnostics.add(warning(
+                Code::ProfileInvalid,
+                "Layer-time cooling is enabled but no layer markers were found, so it "
+                "has no effect. The slicer must emit ';HEIGHT:' or '; Z_HEIGHT:'."));
+        } else {
+            const auto drops = layerCoolingProfile(layers, analysis.seconds,
+                                                   extruder.coolingLayerTime,
+                                                   extruder.coolingMaxDrop);
+            plan.layerCoolingDrop = drops;
+
+            for (std::size_t i = 0; i < n && i < drops.size(); ++i) {
+                // Never cool below the calibrated floor: the user has not validated
+                // anything under it, and the flow budget there is already minimal.
+                plan.desiredTemperature[i] =
+                    std::max(filament.lowTemp, plan.desiredTemperature[i] - drops[i]);
+            }
+        }
     }
 
     // --- 4. constrain to what the hotend can deliver -------------------------

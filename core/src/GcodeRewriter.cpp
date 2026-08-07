@@ -14,30 +14,6 @@
 
 namespace sb53 {
 namespace detail {
-namespace {
-
-[[nodiscard]] bool startsWith(std::string_view s, std::string_view p) noexcept
-{
-    return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
-}
-
-[[nodiscard]] std::string_view trim(std::string_view s) noexcept
-{
-    const auto a = s.find_first_not_of(" \t\r");
-    if (a == std::string_view::npos) {
-        return {};
-    }
-    return s.substr(a, s.find_last_not_of(" \t\r") - a + 1);
-}
-
-// Everything before a ';' is the command; the rest is a comment.
-[[nodiscard]] std::string_view command(std::string_view line) noexcept
-{
-    const auto semi = line.find(';');
-    return trim(semi == std::string_view::npos ? line : line.substr(0, semi));
-}
-
-} // namespace
 
 double extrusionArea(Millimetres layerHeight, Millimetres lineWidth) noexcept
 {
@@ -57,30 +33,6 @@ MillimetresPerMin flowToFeedrate(CubicMmPerSec flow, double area) noexcept
         return 0.0;
     }
     return 60.0 * flow / area;
-}
-
-std::optional<double> word(std::string_view line, char letter) noexcept
-{
-    const std::string_view cmd = command(line);
-    for (std::size_t i = 0; i < cmd.size(); ++i) {
-        // A word letter must start a token, otherwise the 'E' in a filename or the 'F'
-        // of a different word would match.
-        if (cmd[i] != letter) {
-            continue;
-        }
-        if (i > 0 && cmd[i - 1] != ' ' && cmd[i - 1] != '\t') {
-            continue;
-        }
-        const std::string_view rest = cmd.substr(i + 1);
-        double value = 0.0;
-        const auto* begin = rest.data();
-        const auto* end = rest.data() + rest.size();
-        const auto [ptr, ec] = std::from_chars(begin, end, value);
-        if (ec == std::errc{} && ptr != begin) {
-            return value;
-        }
-    }
-    return std::nullopt;
 }
 
 FeatureType parseFeatureType(std::string_view value) noexcept
@@ -106,28 +58,6 @@ FeatureType parseFeatureType(std::string_view value) noexcept
     if (v == "Overhang wall" || v == "Overhang perimeter") { return FeatureType::Overhang; }
     if (v == "Skirt" || v == "Brim" || v == "Skirt/Brim") { return FeatureType::Skirt; }
     return FeatureType::Unknown;
-}
-
-std::string formatNumber(double value, int maxDecimals)
-{
-    // Locale-invariant, and trailing zeros removed so output reads like the slicer's own
-    // (M104 S213, not M104 S213.000). The legacy achieved this via Delphi's FloatToStr;
-    // we do it explicitly because relying on locale is what broke it (known-bugs.md #5).
-    std::string out(32, '\0');
-    auto [ptr, ec] = std::to_chars(out.data(), out.data() + out.size(), value,
-                                   std::chars_format::fixed, maxDecimals);
-    if (ec != std::errc{}) {
-        return "0";
-    }
-    out.resize(static_cast<std::size_t>(ptr - out.data()));
-
-    if (out.find('.') != std::string::npos) {
-        out.erase(out.find_last_not_of('0') + 1);
-        if (!out.empty() && out.back() == '.') {
-            out.pop_back();
-        }
-    }
-    return out.empty() ? "0" : out;
 }
 
 } // namespace detail
@@ -332,19 +262,11 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
 
         // --- an extruding move ----------------------------------------------
         //
-        // "Extruding" requires actual travel. A positive E with no X/Y is an unretract
-        // or a prime, which pushes filament back into the nozzle rather than laying it
-        // down.
-        //
-        // This must match the analyser exactly. MoveDumpParser zeroes both the retract
-        // and its matching unretract, so if the rewriter counted unretracts its filament
-        // coordinate would run ahead of the plan's -- and since the plan holds its last
-        // value past the end, temperature commands would silently stop partway through
-        // the print. Differential comparison against the legacy caught precisely that:
-        // the plan covered 3475 mm while the rewriter had already reached 5616 mm.
-        const bool travels = word(line, 'X').has_value() || word(line, 'Y').has_value();
-
-        if (isMove && travels && e.has_value() && *e > 0.0) {
+        // Shared with the scanner via detail::isExtrudingMove, deliberately: the scanner
+        // establishes the layer boundaries and the analyser the plan, both in filament
+        // space, and any disagreement about what counts as extrusion misaligns them.
+        // That has already happened once here -- see the unretract regression test.
+        if (detail::isExtrudingMove(line) && e.has_value()) {
             usedFilament += *e;
 
             if (const auto planned =

@@ -101,6 +101,18 @@ struct FlowSecond {
 // Scan pass (ALGORITHM.md §9)
 // ---------------------------------------------------------------------------
 
+// Where a layer begins.
+//
+// Recorded in FILAMENT space rather than by line or move index. Line numbers shift when
+// commands are inserted, and the estimator does not emit one move per G0/G1 line
+// (measured: 61,189 move lines produced 58,352 moves), so neither is a usable key.
+// Cumulative filament is the same invariant the temperature plan uses.
+struct LayerMark {
+    Millimetres usedFilament = 0.0;   // cumulative extrusion when the layer starts
+    Millimetres height = 0.0;         // layer height from the slicer marker
+    std::size_t line = 0;             // 1-based, for diagnostics only
+};
+
 // What the first pass over the input file establishes, before any numerical work.
 struct ScanResult {
     ExtrusionMode extrusionMode = ExtrusionMode::Unknown;
@@ -117,6 +129,12 @@ struct ScanResult {
     std::string filamentType;
 
     std::size_t totalLines = 0;
+
+    // Layer starts, in order. Used for layer-time cooling (ALGORITHM.md §5.5).
+    std::vector<LayerMark> layers;
+
+    // Total filament extruded within the print body, by the same rule the rewriter uses.
+    Millimetres bodyFilament = 0.0;
 
     [[nodiscard]] bool hasPrintBody() const noexcept {
         return bodyFirstLine > 0 && bodyLastLine >= bodyFirstLine;
@@ -150,6 +168,11 @@ struct TemperaturePlan {
 
     // §5.3 — what the filament calibration asks for.
     std::vector<Celsius> desiredTemperature;
+
+    // §5.5 — per-second temperature reduction applied for short layer times. Empty when
+    // the feature is off. Retained so the UI can show why a section runs cooler than the
+    // flow alone would suggest.
+    std::vector<Celsius> layerCoolingDrop;
 
     // §5.4 — what the hotend can actually deliver, after slew limiting.
     //

@@ -1,7 +1,9 @@
 #include "sb53/GcodeScanner.hpp"
 
+#include "sb53/GcodeText.hpp"
 #include "sb53/Version.hpp"
 
+#include <charconv>
 #include <istream>
 #include <string>
 
@@ -134,9 +136,40 @@ ScanResult GcodeScanner::scan(std::istream& in, DiagnosticList& diagnostics)
         // part of the body, but the line that marks the end is not. Getting this wrong
         // shifts every downstream artefact by one line.
 
-        if (result.bodyFirstLine == 0 &&
-            (startsWith(line, kHeightMarker) || startsWith(line, kZHeightMarker))) {
+        const bool isLayerMarker =
+            startsWith(line, kHeightMarker) || startsWith(line, kZHeightMarker);
+
+        if (result.bodyFirstLine == 0 && isLayerMarker) {
             result.bodyFirstLine = lineNumber;
+        }
+
+        // Within the body, track filament and layer starts.
+        //
+        // The accumulation rule MUST match GcodeRewriter's, or the layer boundaries land
+        // at the wrong place in the plan. Both use detail::isExtrudingMove for exactly
+        // that reason.
+        if (result.bodyFirstLine != 0 && result.bodyLastLine == 0) {
+            if (isLayerMarker) {
+                LayerMark mark;
+                mark.usedFilament = result.bodyFilament;
+                mark.line = lineNumber;
+
+                const auto colon = line.find(':');
+                if (colon != std::string_view::npos) {
+                    const std::string_view value = line.substr(colon + 1);
+                    double height = 0.0;
+                    const auto* begin = value.data();
+                    if (std::from_chars(begin, begin + value.size(), height).ec ==
+                        std::errc{}) {
+                        mark.height = height;
+                    }
+                }
+                result.layers.push_back(mark);
+            } else if (detail::isExtrudingMove(line)) {
+                if (const auto e = detail::word(line, 'E')) {
+                    result.bodyFilament += *e;
+                }
+            }
         }
 
         if (result.bodyFirstLine != 0 && result.bodyLastLine == 0 &&

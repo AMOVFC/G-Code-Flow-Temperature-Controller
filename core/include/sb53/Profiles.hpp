@@ -37,12 +37,34 @@ struct ExtruderProfile {
     // the cost of tracking the flow less closely.
     int smoothingWindow = 20;
 
+    // --- layer-time cooling (ALGORITHM.md §5.5) -----------------------------
+    //
+    // On small or fast layers the previous layer has not set before the next is laid on
+    // top, so it sags and loses definition. Slicers address this by slowing down; this
+    // tool additionally drops the nozzle temperature, which stiffens the extrudate
+    // sooner without costing as much time.
+    //
+    // Layers at or above `coolingLayerTime` get no reduction. Below it the reduction
+    // ramps linearly, reaching `coolingMaxDrop` at zero layer time. The result is still
+    // clamped to the filament's calibrated minimum -- cooling never takes the nozzle
+    // somewhere the user has not validated.
+    //
+    // Zero `coolingMaxDrop` disables the feature entirely, which is the default: it
+    // changes printed output, so it must be opted into.
+    Seconds coolingLayerTime = 15.0;
+    Celsius coolingMaxDrop = 0.0;
+
     // Klipper-style start macro rewriting (ALGORITHM.md §9). `startMacro` is the line
     // prefix to find (e.g. "PRINT_START") and `temperatureToken` the parameter whose
     // value is replaced (e.g. "EXTRUDER_TEMP"). Empty startMacro disables this path, in
     // which case the M109 route is used instead.
     std::string startMacro;
     std::string temperatureToken;
+
+    [[nodiscard]] bool layerCoolingEnabled() const noexcept
+    {
+        return coolingMaxDrop > 0.0 && coolingLayerTime > 0.0;
+    }
 
     [[nodiscard]] double riseRatePerSecond() const noexcept
     {

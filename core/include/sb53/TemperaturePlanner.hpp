@@ -25,7 +25,30 @@ struct PlannerOptions {
                                               const ExtruderProfile& extruder,
                                               const FilamentProfile& filament,
                                               DiagnosticList& diagnostics,
-                                              const PlannerOptions& options = {});
+                                              const PlannerOptions& options = {},
+                                              const std::vector<LayerMark>& layers = {});
+
+// --- layer-time cooling (ALGORITHM.md §5.5) ---------------------------------
+
+// How long each layer takes, derived by looking up the time at each layer's start and
+// end filament position in the per-second timeline.
+//
+// Layer boundaries are known in filament space; the timeline relates filament to time.
+// Neither line numbers nor move indices can be used: lines shift when commands are
+// inserted, and the estimator does not emit one move per move-line.
+[[nodiscard]] std::vector<Seconds> computeLayerDurations(
+    const std::vector<LayerMark>& layers, const std::vector<FlowSecond>& seconds);
+
+// The temperature reduction for a layer of the given duration: zero at or above
+// `thresholdSeconds`, ramping linearly to `maxDrop` at zero.
+[[nodiscard]] Celsius coolingDropForLayerTime(Seconds layerTime, Seconds thresholdSeconds,
+                                              Celsius maxDrop) noexcept;
+
+// Spreads per-layer drops across the per-second timeline, so each second carries the
+// reduction belonging to the layer it falls in.
+[[nodiscard]] std::vector<Celsius> layerCoolingProfile(
+    const std::vector<LayerMark>& layers, const std::vector<FlowSecond>& seconds,
+    Seconds thresholdSeconds, Celsius maxDrop);
 
 // --- stages, exposed individually so they can be tested and reused ----------
 

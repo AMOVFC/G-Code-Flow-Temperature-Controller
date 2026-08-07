@@ -127,7 +127,8 @@ the flow signal — they are treated as zero flow. `[CODE]` `[PHYS]`
 
 ## 5. Temperature planning
 
-Four stages, in order:
+Five stages, in order. Note that §5.5 modifies the *desired* curve and therefore runs
+before the slew limit in §5.4 is applied, even though it is numbered after it.
 
 ### 5.1 Blend average and maximum flow
 
@@ -181,6 +182,48 @@ desired curve is walked forward and slew-limited by the applicable rate, produci
 
 The README's advice to calibrate PID between 70% and 90% of maximum temperature `[DOC]`
 exists because this stage assumes the hotend can actually hit its commanded rates.
+### 5.5 Reduce temperature on fast layers `[DESIGN]`
+
+> Not present in the original tool. Added 2026-08-07.
+
+On small or fast layers the previous layer has not solidified before the next is laid on
+top of it, so it sags and loses definition — the classic drooping benchy chimney. Slicers
+address this by slowing down (minimum layer time). This tool additionally **lowers the
+nozzle temperature**, which stiffens the extrudate sooner without costing as much time.
+`[PHYS]`
+
+Two parameters:
+
+- **`coolingLayerTime`** — layers at or above this duration get no reduction.
+- **`coolingMaxDrop`** — the reduction applied at zero layer time.
+
+Between them the reduction ramps linearly:
+
+```
+drop = maxDrop × (1 − layerTime / coolingLayerTime)      for layerTime < coolingLayerTime
+drop = 0                                                  otherwise
+```
+
+Three properties that matter:
+
+1. **Applied to the *desired* curve, before slew limiting** (§5.4). Applying it afterwards
+   would command drops the hotend cannot physically achieve.
+2. **Clamped to the filament's calibrated minimum.** Cooling never takes the nozzle below
+   a temperature the user has validated — the same rule as §5.3.
+3. **Off by default** (`coolingMaxDrop = 0`). It changes printed output, so it must be
+   opted into.
+
+**Layer boundaries are located in filament space**, not by line or move index. Line
+numbers shift when commands are inserted, and the estimator does not emit one move per
+move-line (measured: 61,189 move lines → 58,352 moves). Cumulative filament is the same
+invariant the plan itself uses (§6), so the scanner records it with exactly the rule the
+rewriter later replays.
+
+> ⚠️ **Choosing the threshold requires knowing your print.** A 3DBenchy at 8 minutes over
+> 192 layers averages ~2.5 s per layer, so a 15 s threshold cools essentially the whole
+> print and degenerates into a flat temperature offset. Check the layer-time distribution
+> before setting it — 3–5 s is a more useful threshold for small models.
+
 
 ## 6. Rewriting the G-code
 

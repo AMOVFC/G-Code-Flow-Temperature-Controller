@@ -218,8 +218,16 @@ int runAnalyze(std::string_view path, std::filesystem::path estimator,
     // Profiles are hard-coded defaults for now; the database repository lands with the
     // GUI at M8. Override the interesting knobs from the command line so the effect of
     // each can be seen without a rebuild.
+    // Layer marks come from the scan, and layer-time cooling needs them.
+    std::vector<sb53::LayerMark> layers;
+    {
+        std::ifstream in{std::string(path), std::ios::binary};
+        sb53::DiagnosticList scanDiags;
+        layers = sb53::GcodeScanner::scan(in, scanDiags).layers;
+    }
+
     sb53::DiagnosticList planDiags;
-    const auto plan = sb53::planTemperature(a, extruder, filament, planDiags);
+    const auto plan = sb53::planTemperature(a, extruder, filament, planDiags, {}, layers);
     report(planDiags);
     if (planDiags.hasErrors()) {
         return 1;
@@ -363,6 +371,9 @@ void parseProfileFlags(const std::vector<std::string_view>& args, Settings& s)
         else if (k == "--fall")      { s.extruder.tempFall = number(v, 5.0); }
         else if (k == "--start-macro") { s.extruder.startMacro = std::string(v); }
         else if (k == "--temp-token")  { s.extruder.temperatureToken = std::string(v); }
+        else if (k == "--cool-below")  { s.extruder.coolingLayerTime = number(v, 15.0); }
+        else if (k == "--cool-drop")   { s.extruder.coolingMaxDrop = number(v, 0.0); }
+        else if (k == "--adjust-pa")   { s.adjustPressureAdvance = true; }
     }
 }
 
@@ -505,7 +516,8 @@ int runProcess(std::string_view inputPath, std::string outputPath,
 
     // --- plan ---------------------------------------------------------------
     progress.onPhase(sb53::Phase::Planning, -1.0);
-    const auto plan = sb53::planTemperature(analysis, s.extruder, s.filament, diags);
+    const auto plan = sb53::planTemperature(analysis, s.extruder, s.filament, diags, {},
+                                            scan.layers);
     if (diags.hasErrors()) {
         progress.finish();
         report(diags);
@@ -559,6 +571,16 @@ int runProcess(std::string_view inputPath, std::string outputPath,
                 plan.minTemperature, plan.maxTemperature, plan.initialTemperature);
     std::printf("  M104 commands      : %zu\n", stats.temperatureCommands);
     std::printf("  feedrates reduced  : %zu\n", stats.feedratesReduced);
+    if (s.extruder.layerCoolingEnabled() && !plan.layerCoolingDrop.empty()) {
+        double maxDrop = 0.0;
+        std::size_t cooled = 0;
+        for (const double d : plan.layerCoolingDrop) {
+            maxDrop = std::max(maxDrop, d);
+            if (d > 0.01) { ++cooled; }
+        }
+        std::printf("  layer cooling      : %zu of %zu seconds, up to -%.1f C\n",
+                    cooled, plan.layerCoolingDrop.size(), maxDrop);
+    }
     if (stats.pressureAdvanceCommands > 0) {
         std::printf("  pressure advance   : %zu\n", stats.pressureAdvanceCommands);
     }

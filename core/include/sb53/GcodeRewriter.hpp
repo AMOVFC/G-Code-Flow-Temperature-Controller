@@ -7,6 +7,7 @@
 #pragma once
 
 #include "sb53/Diagnostics.hpp"
+#include "sb53/GcodeText.hpp"   // detail::word, detail::formatNumber, ...
 #include "sb53/Model.hpp"
 #include "sb53/Ports.hpp"
 #include "sb53/Profiles.hpp"
@@ -68,14 +69,8 @@ namespace detail {
 // Feedrate (mm/min) that achieves `flow` given a bead of that cross-section.
 [[nodiscard]] MillimetresPerMin flowToFeedrate(CubicMmPerSec flow, double area) noexcept;
 
-// Extracts a G-code word (e.g. 'F', 'E') from a line, ignoring any trailing comment.
-[[nodiscard]] std::optional<double> word(std::string_view line, char letter) noexcept;
-
 // Maps an OrcaSlicer/PrusaSlicer feature-type marker to a FeatureType.
 [[nodiscard]] FeatureType parseFeatureType(std::string_view value) noexcept;
-
-// Formats a number the way G-code expects: locale-invariant, no trailing zeros.
-[[nodiscard]] std::string formatNumber(double value, int maxDecimals);
 
 } // namespace detail
 } // namespace sb53
