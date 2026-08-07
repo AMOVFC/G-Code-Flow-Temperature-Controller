@@ -23,6 +23,11 @@ _deps/
 testdata/scratch/
 Testing/
 
+# Full-size reference G-code: 7.6 MB of inputs, too large to version.
+# Identified by SHA-256 in testdata/manifest.json, which IS committed.
+# The trimmed fixtures in testdata/fixtures/ are committed. See testdata/README.md.
+testdata/reference/
+
 # OS
 Thumbs.db
 .DS_Store

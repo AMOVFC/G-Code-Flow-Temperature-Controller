@@ -1,0 +1,46 @@
+﻿{
+    "captured":  "2026-08-07",
+    "slicer":  "OrcaSlicer 2.4.2",
+    "printer":  "AWD V0 @ 0.4 nozzle",
+    "filament":  "\"Elegoo HS PLA+ awd hott\"",
+    "extrusion":  "relative (M83)",
+    "reference":  [
+                      {
+                          "name":  "legacy-out-basic.gcode",
+                          "bytes":  2199221,
+                          "sha256":  "828953C213285EDD982DF9EB95D5641CB718902DCB7C21E3BD7286A65F178344"
+                      },
+                      {
+                          "name":  "legacy-out-basic2.gcode",
+                          "bytes":  2067945,
+                          "sha256":  "A70392E7CE99E755D09C60208F9C0B840C45764D6A632E944042EB1889C3B45D"
+                      },
+                      {
+                          "name":  "raw-arcs.gcode",
+                          "bytes":  1842781,
+                          "sha256":  "1CC1DCB825823997C0DCE863AEEFA4B3E84653FE7B7B9BA8E491B4E8047D196F"
+                      },
+                      {
+                          "name":  "raw-basic.gcode",
+                          "bytes":  1828926,
+                          "sha256":  "33DB7470FFEB98E12FBFBA8DF28C1C8E93B87E9CF7F4CA5CF87A924309888D0D"
+                      }
+                  ],
+    "fixtures":  [
+                     {
+                         "name":  "legacy-processed.gcode",
+                         "bytes":  95043,
+                         "sha256":  "651F193DFE33DF4B6D329E1AB83B29BAC12F51DA6B1FF5A19440A6BCA9FCEE3B"
+                     },
+                     {
+                         "name":  "orca-arcs.gcode",
+                         "bytes":  93941,
+                         "sha256":  "0797F02CA5C97C0AE9AD16490975DE589DDE598D446A91357FE2BEC9A377FA94"
+                     },
+                     {
+                         "name":  "orca-basic.gcode",
+                         "bytes":  91987,
+                         "sha256":  "5886572217F779E083DCC445D8108549ACEAC0640CA3D42959D665C48448E0DF"
+                     }
+                 ]
+}

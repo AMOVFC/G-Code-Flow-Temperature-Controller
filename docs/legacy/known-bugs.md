@@ -156,6 +156,46 @@ partly attacker-influenceable via a crafted G-code file's `filament_settings_id`
 
 ---
 
+### 11. Silent failure produces a plausible but unprocessed file
+
+**Observed in the wild**, not merely inferred from the source.
+
+When the estimator returns no moves, total computed time is zero. `Unit1.pas:399-407`
+then appends nothing to the time string, and `Unit1.pas:431` writes the bare comment:
+
+```
+; estimated printing time (normal mode) =
+```
+
+Meanwhile `Unit1.pas:436` has already written the `; Edited by …` header, and the print
+body is copied through unmodified because there is no temperature plan to apply.
+
+The result is a file that **looks processed** — correct header, plausible size, valid
+G-code — but contains no `M104` commands and is byte-equivalent to the input. No error
+dialog is shown. The user has no way to tell success from failure except by manually
+searching the output for temperature commands.
+
+Of the nineteen sample files captured on 2026-08-07 during a real troubleshooting
+session, **nine carried the header and only two had actually been processed.** Seven
+silent failures out of nine attempts.
+
+Worse, because the header is present, the re-processing guard at `Unit1.pas:785` will
+**refuse to process the file again** — so a silently failed output cannot simply be
+re-run; it must be regenerated from the slicer.
+
+**Severity:** high. Silent, common in practice, and actively obstructs recovery.
+
+**Rewrite:**
+- An empty move set is `Code::NoExtrusionFound`; a failing estimator is
+  `Code::EstimatorFailed`. Both are errors, and **no output file is written** when
+  processing fails.
+- The processed-file marker is written only on success.
+- Success reporting states what actually changed — temperature commands emitted,
+  feedrates reduced, temperature range — via `RewriteStats`, so "it did nothing" is
+  visible rather than inferred.
+
+---
+
 ## Structural problems
 
 Not bugs, but the reasons a port was rejected ([ADR-0001](../adr/0001-clean-room-rewrite.md)):

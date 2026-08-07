@@ -103,8 +103,20 @@ all, and it is the artifact the future OrcaSlicer cloud plugin needs.
   The `core-has-no-qt` guard was verified to actually **fail** on a file containing
   `#include <QString>` — a guard never seen to fail is not a guard.
 
+- **Test data captured** (2026-08-07). Nineteen OrcaSlicer 2.4.2 files supplied by the
+  user. Analysis produced one substantive finding, now recorded as
+  [known-bugs.md #11](legacy/known-bugs.md): the legacy **fails silently** — seven of nine
+  processed files carry the `; Edited by` header and an empty estimated-time field but
+  contain no `M104` commands at all. They look processed and are not. This is the
+  strongest available argument for the loud-failure design in `Diagnostics.hpp`.
+
+  Confirmed from real output: temperatures emit as `M104 S212.7` (one decimal, no
+  trailing zero); the start macro is rewritten as
+  `PRINT_START EXTRUDER_TEMP=213.3 BED_TEMP=65    ; Reset Initial Temperature`; speed
+  lines carry `; Keep Slicer Speed` / `; Reset Speed Before Retraction` comments.
+
 ### In progress (M2)
-Nothing started yet. `Model.hpp` defines the types the scanner will populate
+Nothing implemented yet. `Model.hpp` defines the types the scanner will populate
 (`ScanResult`, `ExtrusionMode`); `GcodeScanner.cpp` does not exist.
 
 ### Next concrete action
@@ -130,12 +142,17 @@ required until M3.
 
 | Item | Needed from | Blocks |
 |---|---|---|
-| **Sample G-code files** — 3–4 sliced files, ideally from OrcaSlicer, at least one with arc moves (`G2`/`G3`) and one small file for fast iteration | User | M2 testing, M7 entirely |
-| **A physical printer for validation** | User | M9 |
+| ~~Sample G-code files~~ | ~~User~~ | ✅ **resolved 2026-08-07** |
+| **A physical printer for validation** | User | M9 only |
 
-No sample G-code exists anywhere in this repository — this is the one hard external
-dependency. Everything through M6 can be built without it using synthetic fixtures, but
-M7 cannot start.
+Sample G-code was supplied: 19 OrcaSlicer 2.4.2 files from a real troubleshooting session.
+See [testdata/README.md](../testdata/README.md) for provenance and an important caveat —
+most of the *processed* files are silent failures, not references, and only two are usable
+as expected output.
+
+Committed fixtures (~90 KB each) cover the normal path, arcs, and an already-processed
+file. Full-size references are git-ignored but hash-pinned in `testdata/manifest.json`;
+tests that need them **skip with a message** when absent, so a fresh clone stays green.
 
 ---
 
