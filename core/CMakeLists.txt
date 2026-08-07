@@ -9,6 +9,7 @@ add_library(sb53_core STATIC
     src/FlowAnalysis.cpp
     src/GcodeScanner.cpp
     src/Model.cpp
+    src/TemperaturePlanner.cpp
     src/platform/SubprocessRunner.cpp
 )
 

@@ -9,6 +9,7 @@
 #include "sb53/FlowAnalysis.hpp"
 #include "sb53/GcodeScanner.hpp"
 #include "sb53/SubprocessRunner.hpp"
+#include "sb53/TemperaturePlanner.hpp"
 #include "sb53/Version.hpp"
 
 #include <algorithm>
@@ -121,7 +122,9 @@ std::filesystem::path findEstimator(const std::filesystem::path& exeDir)
 // so it is safe to point at any file. This is the first command that exercises the
 // IProcessRunner seam against a live subprocess.
 int runAnalyze(std::string_view path, std::filesystem::path estimator,
-               const std::filesystem::path& exeDir)
+               const std::filesystem::path& exeDir,
+               const sb53::ExtruderProfile& extruder,
+               const sb53::FilamentProfile& filament)
 {
     if (estimator.empty()) {
         estimator = findEstimator(exeDir);
@@ -192,28 +195,56 @@ int runAnalyze(std::string_view path, std::filesystem::path estimator,
     std::printf("peak flow      : %.2f mm3/s\n", a.peakFlow);
     std::printf("timeline       : %zu one-second buckets\n", a.seconds.size());
 
-    if (!a.seconds.empty()) {
-        double sum = 0.0;
-        double peakAverage = 0.0;
-        for (const auto& s : a.seconds) {
-            sum += s.averageFlow;
-            peakAverage = std::max(peakAverage, s.averageFlow);
-        }
-        std::printf("mean flow      : %.2f mm3/s\n",
-                    sum / static_cast<double>(a.seconds.size()));
-        std::printf("peak 1s average: %.2f mm3/s\n", peakAverage);
+    if (a.seconds.empty()) {
+        return 0;
+    }
 
-        // A coarse profile, so the shape is visible without a chart.
-        std::printf("\nflow over time (each row is one second, sampled):\n");
-        const std::size_t step = std::max<std::size_t>(1, a.seconds.size() / 20);
-        for (std::size_t i = 0; i < a.seconds.size(); i += step) {
-            const auto& s = a.seconds[i];
-            const int bars = peakAverage > 0.0
-                ? static_cast<int>((s.averageFlow / peakAverage) * 40.0)
-                : 0;
-            std::printf("  %5.0fs %6.2f %s\n", s.time, s.averageFlow,
-                        std::string(static_cast<std::size_t>(bars), '#').c_str());
-        }
+    double sum = 0.0;
+    double peakAverage = 0.0;
+    for (const auto& s : a.seconds) {
+        sum += s.averageFlow;
+        peakAverage = std::max(peakAverage, s.averageFlow);
+    }
+    std::printf("mean flow      : %.2f mm3/s\n",
+                sum / static_cast<double>(a.seconds.size()));
+    std::printf("peak 1s average: %.2f mm3/s\n", peakAverage);
+
+    // --- temperature plan ---------------------------------------------------
+    //
+    // Profiles are hard-coded defaults for now; the database repository lands with the
+    // GUI at M8. Override the interesting knobs from the command line so the effect of
+    // each can be seen without a rebuild.
+    sb53::DiagnosticList planDiags;
+    const auto plan = sb53::planTemperature(a, extruder, filament, planDiags);
+    report(planDiags);
+    if (planDiags.hasErrors()) {
+        return 1;
+    }
+
+    std::printf("\nfilament       : %s  flow %.1f/%.1f/%.1f mm3/s -> %.0f/%.0f/%.0f C\n",
+                filament.type.c_str(),
+                filament.lowFlow, filament.midFlow, filament.highFlow,
+                filament.lowTemp, filament.midTemp, filament.highTemp);
+    std::printf("bias           : %d/10 (0=quality, 10=speed)   smoothing: %d s\n",
+                filament.speedQualityBias, extruder.smoothingWindow);
+    std::printf("hotend         : +%.1f C/s heating, -%.1f C/s cooling\n",
+                extruder.riseRatePerSecond(), extruder.fallRatePerSecond());
+    std::printf("\ninitial temp   : %.1f C\n", plan.initialTemperature);
+    std::printf("planned range  : %.1f - %.1f C\n",
+                plan.minTemperature, plan.maxTemperature);
+
+    // A coarse profile, so the shape is visible without a chart. Flow and the resulting
+    // temperature side by side is the whole point of the tool.
+    std::printf("\n    time    flow  temp\n");
+    const std::size_t step = std::max<std::size_t>(1, a.seconds.size() / 24);
+    for (std::size_t i = 0; i < a.seconds.size(); i += step) {
+        const int bars = peakAverage > 0.0
+            ? static_cast<int>((a.seconds[i].averageFlow / peakAverage) * 34.0)
+            : 0;
+        std::printf("  %5.0fs %6.2f %5.1f %s\n",
+                    a.seconds[i].time, a.seconds[i].averageFlow,
+                    plan.achievableTemperature[i],
+                    std::string(static_cast<std::size_t>(bars), '#').c_str());
     }
 
     return 0;
@@ -248,15 +279,44 @@ int main(int argc, char** argv)
             return 64;
         }
         std::filesystem::path estimator;
-        for (std::size_t i = 2; i + 1 < args.size(); ++i) {
-            if (args[i] == "--estimator") {
-                estimator = std::string(args[i + 1]);
+
+        // Hard-coded defaults, overridable per-run. Real profiles come from the database
+        // at M8; these exist so the planner's behaviour can be explored now. The values
+        // are the README's own worked example, NOT a recommendation -- calibrate your
+        // own (ALGORITHM.md §3).
+        sb53::ExtruderProfile extruder;
+        sb53::FilamentProfile filament;
+
+        const auto number = [&](std::string_view text, double fallback) {
+            try {
+                return std::stod(std::string(text));
+            } catch (...) {
+                std::fprintf(stderr, "warning: could not parse '%s'; using %g\n",
+                             std::string(text).c_str(), fallback);
+                return fallback;
             }
+        };
+
+        for (std::size_t i = 2; i + 1 < args.size(); ++i) {
+            const auto& key = args[i];
+            const auto& value = args[i + 1];
+            if (key == "--estimator")      { estimator = std::string(value); }
+            else if (key == "--bias")      { filament.speedQualityBias =
+                                                 static_cast<int>(number(value, 5)); }
+            else if (key == "--smoothing") { extruder.smoothingWindow =
+                                                 static_cast<int>(number(value, 20)); }
+            else if (key == "--low")       { filament.lowFlow = number(value, 1.0); }
+            else if (key == "--mid")       { filament.midFlow = number(value, 15.0); }
+            else if (key == "--high")      { filament.highFlow = number(value, 22.0); }
+            else if (key == "--low-temp")  { filament.lowTemp = number(value, 190.0); }
+            else if (key == "--mid-temp")  { filament.midTemp = number(value, 220.0); }
+            else if (key == "--high-temp") { filament.highTemp = number(value, 235.0); }
         }
+
         std::error_code ec;
         const auto exeDir =
             std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
-        return runAnalyze(args[1], estimator, exeDir);
+        return runAnalyze(args[1], estimator, exeDir, extruder, filament);
     }
 
     if (args[0] == "process") {

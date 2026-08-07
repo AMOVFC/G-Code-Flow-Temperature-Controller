@@ -5,8 +5,8 @@
 > even a short one. A stale STATE.md is worse than none.
 
 **Last updated:** 2026-08-07
-**Current milestone:** M4 — Temperature planner
-**Build status:** ✅ green — 22/22 tests passing (MSVC 19.44, Ninja, C++20)
+**Current milestone:** M5 — G-code rewriter
+**Build status:** ✅ green — 30/30 tests passing (MSVC 19.44, Ninja, C++20)
 
 ## How to build
 
@@ -68,8 +68,8 @@ next until the current one's exit criteria are met and this file is updated.
 | **M1** | **Foundations** — docs, ADRs, CMake skeleton, test harness | ✅ **done** | ~~Build and tests green; docs reviewed~~ |
 | **M2** | **Data model + G-code scanner** | ✅ **done** | ~~Scanner extracts markers, IDs, body bounds, M82/M83 guard from real files; unit tested~~ |
 | **M3** | **Estimator integration + flow aggregation** | ✅ **done** | ~~Per-second flow timeline produced from a recorded fixture, no live subprocess in tests~~ |
-| **M4** | **Temperature planner** | 🟡 in progress | Blend → smooth → map → slew-limit, each unit tested; plan dumped as CSV |
-| M5 | G-code rewriter | ⚪ not started | Valid output G-code; feedrate clamp and PA gating verified |
+| **M4** | **Temperature planner** | ✅ **done** | ~~Blend → smooth → map → slew-limit, each unit tested~~ |
+| **M5** | **G-code rewriter** | 🟡 in progress | Valid output G-code; feedrate clamp and PA gating verified |
 | M6 | CLI end-to-end | ⚪ not started | `sb53 process in.gcode` produces a printable file; **usable as an Orca post-processing script** |
 | M7 | Differential validation vs. legacy | ⚪ not started | Temperature curves track the legacy binary within tolerance on sample files |
 | M8 | Qt frontend | ⚪ not started | Feature parity with the legacy UI, restructured per ARCHITECTURE.md |
@@ -164,32 +164,49 @@ all, and it is the artifact the future OrcaSlicer cloud plugin needs.
 > the loaded printer config and warn on significant mismatch. Cheap, and catches a silent
 > misconfiguration the legacy never mentioned. Needs `Code::PrinterConfigMismatch`.
 
-### In progress (M4)
+- **M4 complete.** `Profiles.hpp` + `TemperaturePlanner`; 30/30 tests green. The full
+  blend → smooth → map → slew-limit chain runs on real files:
+  ```powershell
+  ./build/bin/sb53.exe analyze <your.gcode> --estimator bin/klipper_estimator.exe `
+      --high 35 --high-temp 240 --smoothing 20 --bias 5
+  ```
+  Calibration flags are overridable per run so the planner's behaviour can be explored
+  without a rebuild. The defaults are the README's worked example, **not** a
+  recommendation — real profiles come from the database at M8.
+
+  **The insight worth not losing:** the centered moving average is what gives the hotend
+  *advance warning* of a high-flow section. Because this is post-processing rather than
+  real-time control, look-ahead is free — each smoothed value already depends on flow up
+  to half a window into the future. That is precisely why the slew limiter can be a
+  simple causal filter and still not lag badly, and why the README says the smoothing
+  value materially affects results. Recorded in `TemperaturePlanner.hpp`.
+
+  Safety property under test: whatever the flow does, the planned temperature **never
+  leaves the calibrated low..high band**. Extrapolating past a user's calibration would
+  command temperatures they never validated.
+
+### In progress (M5)
 Nothing implemented yet.
 
 ### Next concrete action
-Implement `TemperaturePlanner` ([ALGORITHM.md §5](ALGORITHM.md)). It is pure computation
-over `SourceAnalysis` — no I/O, no subprocess, no database — so it is entirely unit
-testable.
+Implement `GcodeRewriter` ([ALGORITHM.md §6](ALGORITHM.md)) — the pass that actually
+modifies the file. Walk the print body maintaining cumulative extruded filament, and at
+each move:
 
-Four stages, each independently testable:
+1. Look up the planned temperature via `TemperaturePlan::temperatureAtFilament` (already
+   written and tested). Emit `M104 S…` when it changes.
+2. Invert to a flow budget with `temperatureToFlow` (already written).
+3. Convert flow to feedrate using the extrusion cross-section
+   `h·(w−h) + π(h/2)²`, tracking `;HEIGHT:` and `;WIDTH:` markers as they change.
+4. **Clamp: `min(recommended, sliced)`.** Never faster than the slicer asked. This is the
+   tool's core safety property ([ALGORITHM.md §2](ALGORITHM.md)) and needs an explicit
+   test.
+5. Emit `SET_PRESSURE_ADVANCE` only where `allowsPressureAdvanceChange` permits — already
+   written and tested.
 
-1. **Blend** average and max flow by the Speed↔Quality bias. Linear interpolation, per
-   [ADR-0006](adr/0006-explainable-blend-and-smoothing.md) — a deliberate divergence from
-   the legacy's undocumented formula.
-2. **Smooth** with a centered moving average. At the ends the window clamps and the
-   divisor is the *actual* number of samples averaged, not the nominal width — otherwise
-   the first and last seconds are biased toward zero.
-3. **Map** flow to temperature via the three-point piecewise-linear calibration. Validate
-   `lowFlow < midFlow < highFlow` strictly: the inverse mapping divides by segment width,
-   so equal values are a division by zero (`Code::FlowPointsNotIncreasing` already
-   exists).
-4. **Slew-limit** to what the hotend can physically deliver. Asymmetric — heating is
-   driven, cooling is passive and slower.
-
-This needs `Profiles.hpp` first (`ExtruderProfile`, `FilamentProfile`), which does not
-exist yet. Define the structs only; `IProfileRepository` and SQLite can wait for M8 —
-hard-coded profiles are enough to reach an end-to-end CLI at M6.
+Output formatting confirmed from real legacy output: `M104 S212.7` (one decimal, no
+trailing zero), and speed lines carry `; Keep Slicer Speed` / `; Reset Speed Before
+Retraction` comments.
 
 ---
 

@@ -161,6 +161,14 @@ struct TemperaturePlan {
     // First-layer temperature, applied before flow-derived control begins (§9).
     Celsius initialTemperature = 0.0;
 
+    // Summary of the achievable curve and the smoothed flow it came from. Reported to
+    // the user so "it did nothing" is visible rather than inferred -- the failure mode
+    // that made the legacy so hard to diagnose (legacy/known-bugs.md #11).
+    Celsius minTemperature = 0.0;
+    Celsius maxTemperature = 0.0;
+    CubicMmPerSec minFlow = 0.0;
+    CubicMmPerSec maxFlow = 0.0;
+
     [[nodiscard]] std::size_t size() const noexcept { return achievableTemperature.size(); }
     [[nodiscard]] bool empty() const noexcept { return achievableTemperature.empty(); }
 

@@ -25,6 +25,7 @@ add_executable(sb53_unit_tests
     unit/test_diagnostics.cpp
     unit/test_flow.cpp
     unit/test_model.cpp
+    unit/test_planner.cpp
     unit/test_scanner.cpp
 )
 
