@@ -82,7 +82,11 @@ So the legacy's scale runs **0 = Speed, 10 = Quality**, the opposite of ours.
 
 **Decision: keep our direction, and invert on import.** `0 = Quality, 10 = Speed` matches
 how the README describes the control and is the more natural reading of a
-"Speed ↔ Quality" slider. But any code reading the legacy schema **must** apply:
+"Speed ↔ Quality" slider. **Confirmed by the project owner on 2026-08-07:** zero means
+quality, a higher number means more aggressive. This is settled — do not revisit it
+because the legacy stores the opposite.
+
+Any code reading the legacy schema **must** apply:
 
 ```
 ourBias = 10 - storedSpeedQualityOpt

@@ -1,6 +1,276 @@
 ![image](https://github.com/user-attachments/assets/b5b84ecc-84e5-4583-97c8-efdcdf985504)  
 # G-Code Flow & Temperature Controller
 
+> **This repository contains two implementations.**
+>
+> - **`sb53` (C++)** — an in-progress clean-room rewrite. Command-line only today, no GUI
+>   yet. Build and usage instructions are immediately below.
+> - **The original Delphi application (V1.1)** — the released, GUI version. Its
+>   documentation begins at [Original Delphi Version](#original-delphi-version-v11).
+>
+> The rewrite reproduces the original's temperature curve to within ~1 °C
+> (correlation +0.9947 on a matched benchy). It has **not yet been validated by test
+> prints** — see [Status](#status).
+
+---
+
+# The C++ rewrite (`sb53`)
+
+## Status
+
+| | |
+|---|---|
+| G-code analysis, temperature planning, rewriting | ✅ working |
+| Command-line tool | ✅ working |
+| Validated against the original tool | ✅ +0.9947 curve correlation |
+| **Validated by an actual print** | ❌ **not yet** |
+| Reads your existing `Config.sdb` profiles | ❌ not yet — calibration is passed on the command line |
+| Graphical interface | ❌ not yet |
+
+> ⚠️ **Do not run output from this on a printer unattended.** It has never been physically
+> validated. Compare against the original tool's output first, and watch the first print.
+
+Detailed progress lives in [docs/STATE.md](docs/STATE.md). What the tool actually does,
+and why, is in [docs/ALGORITHM.md](docs/ALGORITHM.md).
+
+## Getting the executable
+
+There is **no prebuilt download yet** — you build it. This takes about two minutes.
+
+### Prerequisites
+
+**Visual Studio 2022** (Community is fine) with two workloads/components:
+
+- *Desktop development with C++*
+- *C++ CMake tools for Windows*
+
+That is everything. CMake, Ninja and the compiler all ship inside Visual Studio — you do
+**not** need a separate CMake install, and you do **not** need a "Developer Command
+Prompt". The build script finds them via `vswhere`.
+
+The **first** build downloads the Catch2 test framework from GitHub, so it needs network
+access once. Later builds work offline.
+
+### Build
+
+```powershell
+git clone <this-repo>
+cd G-Code-Flow-Temperature-Controller
+./tools/build.ps1
+```
+
+The executable lands at **`build/bin/sb53.exe`**.
+
+Options: `-Clean` wipes the build directory, `-Config Debug` builds unoptimised,
+`-NoTests` skips the test run. On failure the script prints the compiler errors and
+writes a full log to `build/build.log`.
+
+### The motion estimator
+
+`sb53` does not compute kinematics itself. It calls **`klipper_estimator.exe`**, which is
+already in this repository at `bin/klipper_estimator.exe`.
+
+> This is a **custom fork**, not upstream Annex-Engineering. Do not substitute the
+> upstream build; the output format is not guaranteed to match.
+
+Beside the estimator there must be a **`config.json`** describing your printer's motion
+limits. `sb53` looks for it next to whatever estimator you point it at.
+
+## Configuring your printer
+
+`config.json` tells the estimator how fast your machine can actually move. **Getting this
+wrong silently corrupts everything downstream** — move timing drives the flow curve, which
+drives the temperature plan.
+
+### Option 1 — pull it from Klipper (best)
+
+```powershell
+./bin/klipper_estimator.exe --config_moonraker_url http://YOUR_PRINTER_IP dump-config > myconfig.json
+```
+
+### Option 2 — write it by hand from `printer.cfg`
+
+Map your Klipper settings across:
+
+| `config.json` | from `printer.cfg` |
+|---|---|
+| `max_velocity` | `[printer] max_velocity` |
+| `max_acceleration` | `[printer] max_accel` |
+| `square_corner_velocity` | `[printer] square_corner_velocity` |
+| `axis_limiter` → `max_velocity` / `max_accel` | `[printer] max_z_velocity` / `max_z_accel` |
+| `extruder_limiter` → `max_velocity` / `max_accel` | `[extruder] max_extrude_only_velocity` / `max_extrude_only_accel` |
+
+A worked example for a CoreXY Voron-derived machine is in
+[`testdata/printer-configs/awd-v0.json`](testdata/printer-configs/awd-v0.json).
+
+> **Sanity check:** run `sb53 analyze` and compare its estimated time against your
+> slicer's. They should be within roughly 10%. If the tool reports far longer, your
+> `config.json` understates the machine's real limits.
+
+## Configuring filament profiles
+
+The rewrite does **not** read `Config.sdb` yet — calibration is passed as command-line
+flags. If you already have profiles in the original tool, read them out with:
+
+```powershell
+python tools/dump-profiles.py "path/to/Config/Config.sdb"
+```
+
+(Read-only; it cannot modify your database.)
+
+### What the numbers mean
+
+You supply **three (flow, temperature) points** and the tool interpolates linearly
+between them.
+
+| Flag | Meaning |
+|---|---|
+| `--low` / `--low-temp` | flow (mm³/s) and temperature (°C) at the low end |
+| `--mid` / `--mid-temp` | the middle calibration point |
+| `--high` / `--high-temp` | the high end |
+| `--rise` | how fast the hotend heats, °C per second |
+| `--fall` | how fast it **cools**, °C per second — usually much slower |
+| `--smoothing` | averaging window in seconds; 10–30 recommended |
+| `--bias` | **0 = quality, 10 = most aggressive** (see below) |
+| `--start-macro` / `--temp-token` | start-macro name and the parameter to rewrite (defaults `PRINT_START` / `EXTRUDER_TEMP`) |
+
+Flow points must be **strictly increasing** (`low < mid < high`) — the tool refuses
+otherwise, because the inverse mapping divides by the gaps between them.
+
+### The bias control
+
+`--bias 0` tracks each second's **average** flow: smoother temperature, fewer swings,
+gentler on sensitive filament. Higher values track the **peak** flow instead: hotter, more
+sustained flow, shorter prints. `--bias 10` is fully aggressive.
+
+> ⚠️ **This is the opposite of the original tool's stored value.** The original's
+> `SPEED_QUALITY_OPT` runs 0 = aggressive, 10 = quality. If you are copying a number out
+> of `Config.sdb`, **subtract it from 10**. A stored `3` corresponds to `--bias 7`.
+>
+> Using the value directly would give you prints roughly 14 °C colder than you are used
+> to, with no warning. Verified empirically — see
+> [ADR-0006](docs/adr/0006-explainable-blend-and-smoothing.md).
+
+Calibrating the three points is unchanged from the original tool; the visual method is
+described under [Ideal Flow/Temperature Calibration](#ideal-flowtemperature-calibration)
+below.
+
+## Using it
+
+### Inspect a file — changes nothing
+
+```powershell
+./build/bin/sb53.exe scan myprint.gcode
+```
+
+Reports extrusion mode, print-body bounds, detected printer/filament profiles, and
+whether the file has already been processed.
+
+### Analyse flow and preview the temperature plan — changes nothing
+
+```powershell
+./build/bin/sb53.exe analyze myprint.gcode --estimator bin/klipper_estimator.exe `
+    --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 `
+    --smoothing 20 --bias 7 --rise 5 --fall 1
+```
+
+Prints move count, estimated time, filament used, peak/mean flow, and an ASCII plot of
+flow against planned temperature. **Use this to check your settings before processing
+anything.**
+
+### Process a file
+
+```powershell
+./build/bin/sb53.exe process myprint.gcode --out processed.gcode `
+    --estimator bin/klipper_estimator.exe `
+    --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 `
+    --smoothing 20 --bias 7 --rise 5 --fall 1
+```
+
+Omit `--out` to overwrite in place — which is what a slicer post-processing hook expects.
+
+Output is written to a scratch file and moved into place only on success, so a failed run
+can never leave a half-written file where your input was.
+
+### Compare two processed files
+
+```powershell
+./build/bin/sb53.exe compare old.gcode new.gcode
+```
+
+Extracts the commanded temperature sequence from each, indexes both by cumulative
+extruded filament, and reports correlation and differences. Use it to check the rewrite
+against the original tool, or to see what changing a setting actually did.
+
+### Exit codes
+
+`0` success · `1` error (details printed to stderr) · `64` bad usage
+
+Errors carry a stable machine-readable code alongside the message, e.g.
+`error: [absolute-extrusion-unsupported] ...`, so scripts can branch on the cause.
+
+## Slicer integration
+
+In OrcaSlicer, *Print Settings → Others → Post-processing Scripts*:
+
+```
+"C:\path\to\build\bin\sb53.exe" process --estimator "C:\path\to\bin\klipper_estimator.exe" --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 --smoothing 20 --bias 7 --rise 5 --fall 1
+```
+
+The slicer appends the G-code path, which `sb53` overwrites in place.
+
+**Requirements**, all enforced with a clear error rather than silently producing bad
+output:
+
+- **Relative extrusion (`M83`)** must be enabled. Absolute (`M82`) is rejected — flow
+  tracking is meaningless without it.
+- The file must not already be processed. Re-running would compound the adjustments.
+- Your end G-code needs `; PRINT_END` as its first line if the slicer does not emit
+  `; EXECUTABLE_BLOCK_END`.
+
+## Testing
+
+```powershell
+./tools/build.ps1              # builds and runs the whole suite
+```
+
+48 tests covering parsing, flow aggregation, temperature planning, the rewriter, and the
+comparison tool. They are hermetic — **no test spawns the estimator or touches your
+printer**; the estimator's output is replayed from a recorded fixture.
+
+Test fixtures live in `testdata/fixtures/` (committed, ~90 KB each). Full-size reference
+files are git-ignored but pinned by SHA-256 in `testdata/manifest.json`; tests needing
+them skip cleanly when absent. See [testdata/README.md](testdata/README.md).
+
+### Verifying against the original tool
+
+The safest way to gain confidence before printing:
+
+1. Slice a model and keep the raw G-code.
+2. Process one copy with the original `SB53-Systems.exe`, another with `sb53 process`,
+   using the same calibration (remembering to invert the bias).
+3. `sb53 compare old.gcode new.gcode` — expect correlation above 0.95.
+4. Print both and compare the results.
+
+> When capturing output from the original tool, **do not use its Save button** — it
+> deletes its own intermediate files.
+
+## Known limitations
+
+- No GUI yet; command line only.
+- Profiles are not read from `Config.sdb` yet.
+- Windows only. The core library is portable and builds on Linux, but process execution is
+  not implemented there yet.
+- Multi-tool and multi-material printing are not supported.
+- Arc moves (`G2`/`G3`) work but are slow — the estimator subdivides them.
+
+---
+
+# Original Delphi Version (V1.1)
+
+> Everything below documents the original released application. It remains the version to
+> use for real printing until the rewrite has been physically validated.
+
 > **This script dynamically adjusts nozzle temperature and print speed (flow rate) to significantly improve print quality and reduce print time, all while simplifying slicer settings. By optimizing these parameters, it makes 3D printing more accessible, less complex and faster.  **
 
 Most slicers use a fixed nozzle temperature throughout an entire print, even though the extrusion flow constantly changes. This means the filament is often printed either hotter or colder than necessary.
