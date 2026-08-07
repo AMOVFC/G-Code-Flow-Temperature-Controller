@@ -282,6 +282,35 @@ Calibration flags are placeholders until the profile database lands at M8.
      `SPEED_QUALITY_OPT` directly would produce prints ~14 °C colder than the user
      expects, silently.
 
+- **Feedrate behaviour verified move-by-move (2026-08-07), correcting an earlier claim.**
+
+  I previously flagged "2261 feedrate reductions vs the legacy's 5207" as a real
+  behavioural difference worth investigating on a test print. **That was wrong.** Those
+  are counts of *emitted lines*, not of decisions: the legacy sometimes writes a
+  superseded `G1 F<slicer>  ; Slicer Speed` line before its replacement, and we do not.
+
+  Comparing the feedrate actually in force at each of the 51,239 extruding moves — valid
+  because the `G1 X/Y/E` sequence is identical across all three files:
+
+  | | legacy | ours |
+  |---|---|---|
+  | moves slowed | 92.7% | 93.4% |
+  | moves sped up | **0.0%** | **0.0%** |
+  | median slowed to | 66% of slicer speed | 67% |
+  | most extreme reduction | 31% | 33% |
+
+  Neither tool ever increases a feedrate, confirming the safety property in
+  [ALGORITHM.md §2](ALGORITHM.md) holds in both.
+
+  Residual difference: median **1.6%**, 79% of moves within 5%, mean absolute 1265 mm/min
+  against a mean feedrate of 29,510 mm/min. Bidirectional (ours higher on 59% of moves,
+  lower on 35%), consistent with small temperature-curve differences propagating through
+  the flow→feedrate inversion rather than any systematic bias.
+
+  **No phase shift.** Correlating the two feedrate traces at offsets from −400 to +400
+  moves, zero offset fits best by a factor of three (1265 vs ~4000 mm/min mean error at
+  any shift). So the difference is not a lead/lag effect.
+
 ### In progress (M8)
 Nothing implemented yet. `tools/dump-profiles.py` reads the schema today; the C++
 `SqliteProfileRepository` is still to be written, and **must invert the bias on import**.
