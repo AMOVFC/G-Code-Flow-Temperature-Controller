@@ -1,0 +1,28 @@
+# Build output
+build/
+out/
+cmake-build-*/
+_deps/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Compiled binaries (the legacy bin/ and Source/V1.2/ .exe files are tracked
+# deliberately — they are the reference implementation, see ADR-0005)
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+*.ilk
+
+# Test artifacts
+testdata/scratch/
+Testing/
+
+# OS
+Thumbs.db
+.DS_Store
