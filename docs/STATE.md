@@ -5,8 +5,11 @@
 > even a short one. A stale STATE.md is worse than none.
 
 **Last updated:** 2026-08-07
-**Current milestone:** M5 — G-code rewriter
-**Build status:** ✅ green — 30/30 tests passing (MSVC 19.44, Ninja, C++20)
+**Current milestone:** M7 — Differential validation
+**Build status:** ✅ green — 42/42 tests passing (MSVC 19.44, Ninja, C++20)
+
+> **The tool works end to end.** `sb53 process` produces a real, valid output file.
+> See "Using it" below.
 
 ## How to build
 
@@ -69,9 +72,9 @@ next until the current one's exit criteria are met and this file is updated.
 | **M2** | **Data model + G-code scanner** | ✅ **done** | ~~Scanner extracts markers, IDs, body bounds, M82/M83 guard from real files; unit tested~~ |
 | **M3** | **Estimator integration + flow aggregation** | ✅ **done** | ~~Per-second flow timeline produced from a recorded fixture, no live subprocess in tests~~ |
 | **M4** | **Temperature planner** | ✅ **done** | ~~Blend → smooth → map → slew-limit, each unit tested~~ |
-| **M5** | **G-code rewriter** | 🟡 in progress | Valid output G-code; feedrate clamp and PA gating verified |
-| M6 | CLI end-to-end | ⚪ not started | `sb53 process in.gcode` produces a printable file; **usable as an Orca post-processing script** |
-| M7 | Differential validation vs. legacy | ⚪ not started | Temperature curves track the legacy binary within tolerance on sample files |
+| **M5** | **G-code rewriter** | ✅ **done** | ~~Valid output G-code; feedrate clamp and PA gating verified~~ |
+| **M6** | **CLI end-to-end** | ✅ **done** | ~~`sb53 process in.gcode` produces a printable file~~ |
+| **M7** | **Differential validation vs. legacy** | 🟡 in progress | Temperature curves track the legacy binary within tolerance on sample files |
 | M8 | Qt frontend | ⚪ not started | Feature parity with the legacy UI, restructured per ARCHITECTURE.md |
 | M9 | Physical validation | ⚪ not started | Test prints succeed on real hardware |
 
@@ -185,28 +188,57 @@ all, and it is the artifact the future OrcaSlicer cloud plugin needs.
   leaves the calibrated low..high band**. Extrapolating past a user's calibration would
   command temperatures they never validated.
 
-### In progress (M5)
+- **M5 + M6 complete.** `GcodeRewriter` plus the full `sb53 process` pipeline; 42/42
+  green. Verified on a real 73k-line benchy: 549 `M104` commands, 1204 feedrates reduced,
+  temperature 203.0–231.0 °C inside the calibrated 195–240 band, start macro rewritten
+  cleanly, and the output correctly **refused by its own scanner** on a second pass.
+
+  Design points worth keeping:
+  - **The estimator sees only the print body**, extracted to a scratch file. Start and end
+    macros contain purge and wipe moves that must not influence the plan — and critically,
+    the rewriter accumulates extruded filament from the same starting line, so the two
+    must cover exactly the same span or every plan lookup is offset.
+  - **Output is staged then moved into place.** A failed run must never leave a
+    half-written file where the input was — when invoked as a post-processing hook, the
+    input *is* the user's only copy.
+  - **The start macro is parsed and re-emitted**, not spliced at a fixed offset. The
+    legacy assumes exactly three digits and corrupts the line otherwise
+    ([known-bugs.md #4](legacy/known-bugs.md)); there are tests for 2-, 3- and
+    4-character replacements.
+
+### Using it
+
+```powershell
+./build/bin/sb53.exe process <in.gcode> --out <out.gcode> `
+    --estimator bin/klipper_estimator.exe `
+    --low 1 --mid 15 --high 35 --low-temp 195 --mid-temp 215 --high-temp 240 `
+    --smoothing 20 --bias 5
+```
+
+Omit `--out` to overwrite in place, which is what a slicer post-processing hook expects.
+Calibration flags are placeholders until the profile database lands at M8.
+
+### In progress (M7)
 Nothing implemented yet.
 
 ### Next concrete action
-Implement `GcodeRewriter` ([ALGORITHM.md §6](ALGORITHM.md)) — the pass that actually
-modifies the file. Walk the print body maintaining cumulative extruded filament, and at
-each move:
+Differential validation against the legacy binary
+([ADR-0005](adr/0005-differential-verification.md)).
 
-1. Look up the planned temperature via `TemperaturePlan::temperatureAtFilament` (already
-   written and tested). Emit `M104 S…` when it changes.
-2. Invert to a flow budget with `temperatureToFlow` (already written).
-3. Convert flow to feedrate using the extrusion cross-section
-   `h·(w−h) + π(h/2)²`, tracking `;HEIGHT:` and `;WIDTH:` markers as they change.
-4. **Clamp: `min(recommended, sliced)`.** Never faster than the slicer asked. This is the
-   tool's core safety property ([ALGORITHM.md §2](ALGORITHM.md)) and needs an explicit
-   test.
-5. Emit `SET_PRESSURE_ADVANCE` only where `allowsPressureAdvanceChange` permits — already
-   written and tested.
+`testdata/reference/legacy-out-speeds.gcode` is a **confirmed-good** legacy output (410
+`M104`, 227.6–270.6 °C, 5207 speed reductions) — the strongest reference available. Its
+raw counterpart is not in the set, so generate matched pairs by running
+`bin/SB53-Systems.exe` directly: given a G-code path as `argv[1]` it processes the file
+with no user interaction.
 
-Output formatting confirmed from real legacy output: `M104 S212.7` (one decimal, no
-trailing zero), and speed lines carry `; Keep Slicer Speed` / `; Reset Speed Before
-Retraction` comments.
+Extract the commanded temperature sequence from both outputs and compare as **curves**,
+not values — the blend formula was deliberately changed ([ADR-0006](adr/0006-explainable-blend-and-smoothing.md))
+and several legacy defects are fixed, so exact agreement is neither expected nor wanted.
+What this catches is misunderstanding the algorithm: a curve trending the wrong way,
+saturating, or phase-shifted.
+
+> Do not use the legacy's Save action when capturing — it deletes its own intermediate
+> files, which are the interesting comparison points.
 
 ---
 

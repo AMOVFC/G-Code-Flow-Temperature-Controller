@@ -16,6 +16,16 @@
                           "sha256":  "A70392E7CE99E755D09C60208F9C0B840C45764D6A632E944042EB1889C3B45D"
                       },
                       {
+                          "name":  "legacy-out-silentfail.gcode",
+                          "bytes":  2000366,
+                          "sha256":  "FA54F81ADFD971C98E4E4A0FFDB127B2B940E2013340FA77C8B4A03AC5F81763"
+                      },
+                      {
+                          "name":  "legacy-out-speeds.gcode",
+                          "bytes":  2444571,
+                          "sha256":  "C612E0D9CA45996200E9BEFFCFBD6C9100D8F1BAE798CFA1148BADA4840ABB75"
+                      },
+                      {
                           "name":  "raw-arcs.gcode",
                           "bytes":  1842781,
                           "sha256":  "1CC1DCB825823997C0DCE863AEEFA4B3E84653FE7B7B9BA8E491B4E8047D196F"
@@ -24,6 +34,11 @@
                           "name":  "raw-basic.gcode",
                           "bytes":  1828926,
                           "sha256":  "33DB7470FFEB98E12FBFBA8DF28C1C8E93B87E9CF7F4CA5CF87A924309888D0D"
+                      },
+                      {
+                          "name":  "raw-fast.gcode",
+                          "bytes":  1937066,
+                          "sha256":  "4A021B1E718646479D8B58BF3F8E227A310EC92F0B533B50390A41548C39D7F4"
                       }
                   ],
     "fixtures":  [
@@ -31,6 +46,11 @@
                          "name":  "legacy-processed.gcode",
                          "bytes":  95043,
                          "sha256":  "651F193DFE33DF4B6D329E1AB83B29BAC12F51DA6B1FF5A19440A6BCA9FCEE3B"
+                     },
+                     {
+                         "name":  "movedump-basic.txt",
+                         "bytes":  87835,
+                         "sha256":  "4CA8474AC9DC8BEB5E9D6609FC5B68E5FAF28B14E53F6DC63860E9955AF4E8F1"
                      },
                      {
                          "name":  "orca-arcs.gcode",

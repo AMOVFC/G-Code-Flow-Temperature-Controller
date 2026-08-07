@@ -71,10 +71,28 @@ if (-not $NoTests) {
 }
 
 $script = "call `"$vcvars`" >nul 2>&1 && " + ($steps -join ' && ')
-& cmd /c $script
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Build failed with exit code $LASTEXITCODE"
+# Tee to a log file. PowerShell's NativeCommandError handling can swallow a failing
+# native command's output, which turns a one-line compiler error into a guessing game --
+# the log is always there regardless.
+$log = Join-Path $buildDir 'build.log'
+if (-not (Test-Path $buildDir)) { New-Item -ItemType Directory -Force -Path $buildDir | Out-Null }
+
+& cmd /c "$script" 2>&1 | Tee-Object -FilePath $log
+$exit = $LASTEXITCODE
+
+if ($exit -ne 0) {
+    Write-Host ""
+    Write-Host "BUILD FAILED (exit $exit). Errors:" -ForegroundColor Red
+    $errors = Select-String -Path $log -Pattern 'error [A-Z]+[0-9]+|FAILED:|Errors while' |
+              Select-Object -First 20
+    if ($errors) {
+        $errors | ForEach-Object { Write-Host "  $($_.Line.Trim())" -ForegroundColor Red }
+    } else {
+        Write-Host "  (no recognisable error lines; see $log)" -ForegroundColor Red
+    }
+    Write-Host ""
+    throw "Build failed with exit code $exit. Full log: $log"
 }
 
 Write-Host ""
