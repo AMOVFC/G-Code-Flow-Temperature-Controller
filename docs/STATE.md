@@ -311,6 +311,60 @@ Calibration flags are placeholders until the profile database lands at M8.
   moves, zero offset fits best by a factor of three (1265 vs ~4000 mm/min mean error at
   any shift). So the difference is not a lead/lag effect.
 
+### In progress: own motion planner (ADR-0007)
+
+Goal: drop the `klipper_estimator.exe` subprocess so the tool is a single artefact and
+can be **linked** into the OrcaSlicer plugin rather than spawned. See
+[ADR-0007](adr/0007-own-motion-planner.md).
+
+**Status: move extraction is exact; timing is 13% fast.**
+
+```
+                    moves   total time
+reference           58352     478.62s
+built-in            58352     416.43s
+difference             +0     -62.19s  (-13.0%)
+
+per-move: mean |diff| 0.00107 s, worst 0.00976 s at move 52487
+          (reference 0.01740 s, ours 0.00764 s), only 10% within 1%
+```
+
+Reproduce with:
+```powershell
+./build/bin/flowtemp.exe kinematics-check <body.gcode> --estimator bin/klipper_estimator.exe
+```
+(undocumented dev command; runs both planners on one file and diffs them)
+
+**Done and verified**
+- Move extraction matches exactly — 58,352 both. The rule: a `G0`/`G1` with at least one
+  of X/Y/Z/E, **excluding** commands that neither travel nor extrude (`G1 X10 Y10` when
+  already there). Dropping those no-ops is what fixed the last off-by-one.
+- `config.json` parsing, including `move_checkers`.
+- Junction-deviation formula verified analytically: a 90° corner at scv 30 and accel
+  150000 yields exactly 30 mm/s, as it must by definition.
+
+**Ruled out**
+- `minimum_cruise_ratio` as a reduced look-ahead acceleration: changed the total by only
+  2 s of the 62 s gap. Kept anyway (it is real Klipper behaviour) but it is not the cause.
+
+**Next investigation.** We are uniformly *too fast*, so something limits velocity in the
+reference that we are not applying. In likely order:
+
+1. **Dump per-move detail for the worst offenders.** `dump-moves` gives only time and
+   flow, but implied velocity = distance / duration, so comparing that against our
+   `maxVelocity`, `entryVelocity` and `exitVelocity` at move 52487 should show which cap
+   is missing. Do this first — it is the highest-information step.
+2. **Check whether the reference caps velocity per-axis**, not just along the
+   `axis_limiter` direction. Our `maxVelocity / |dot(unit, axis)|` may be too permissive
+   on moves that are mostly XY with a little Z.
+3. **Verify the extruder limiter.** Ours converts filament mm/s to toolhead mm/s via the
+   E-to-distance ratio; the reference may apply it to acceleration differently.
+4. **Confirm F is per-minute in every context** and that we track the most recent value
+   across bare `G1 F####` lines correctly.
+
+**Do not remove the subprocess path until parity is demonstrated** — ADR-0007 requires it,
+and every flow and temperature number downstream depends on these timings.
+
 ### In progress (M8)
 Nothing implemented yet. `tools/dump-profiles.py` reads the schema today; the C++
 `SqliteProfileRepository` is still to be written, and **must invert the bias on import**.

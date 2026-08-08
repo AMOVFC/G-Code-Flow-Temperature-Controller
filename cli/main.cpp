@@ -1,4 +1,4 @@
-// sb53-cli — the headless frontend.
+// sb53-cli â€” the headless frontend.
 //
 // This is not a development convenience. It is simultaneously the test driver, the
 // OrcaSlicer post-processing script (the tool's primary real-world use), and the process
@@ -10,6 +10,7 @@
 #include "sb53/FlowAnalysis.hpp"
 #include "sb53/GcodeRewriter.hpp"
 #include "sb53/GcodeScanner.hpp"
+#include "sb53/Kinematics.hpp"
 #include "sb53/SubprocessRunner.hpp"
 #include "sb53/TemperaturePlanner.hpp"
 #include "sb53/Version.hpp"
@@ -337,6 +338,101 @@ int runCompare(std::string_view pathA, std::string_view pathB)
     return 0;
 }
 
+// Compares the built-in motion planner against the reference implementation on the same
+// input. ADR-0007 requires parity before the subprocess can be dropped.
+int runKinematicsCheck(std::string_view path, const std::filesystem::path& estimator)
+{
+    if (estimator.empty()) {
+        std::fprintf(stderr, "error: need klipper_estimator to compare against\n");
+        return 1;
+    }
+    const auto configPath = estimator.parent_path() / "config.json";
+
+    std::string configJson;
+    {
+        std::ifstream cfg{configPath, std::ios::binary};
+        if (!cfg) {
+            std::fprintf(stderr, "error: no config.json at %s\n",
+                         configPath.string().c_str());
+            return 1;
+        }
+        configJson.assign(std::istreambuf_iterator<char>(cfg), {});
+    }
+
+    sb53::DiagnosticList diags;
+    const auto limits = sb53::MachineLimits::fromJson(configJson, diags);
+    if (diags.hasErrors()) {
+        report(diags);
+        return 1;
+    }
+    std::printf("config: v=%.0f a=%.0f scv=%.1f mcr=%.2f  (%zu axis, %zu extruder limits)\n",
+                limits.maxVelocity, limits.maxAcceleration, limits.squareCornerVelocity,
+                limits.minimumCruiseRatio, limits.axisLimits.size(),
+                limits.extruderLimits.size());
+
+    // --- ours ---
+    std::vector<sb53::MoveSample> mine;
+    {
+        std::ifstream in{std::string(path), std::ios::binary};
+        if (!in) { std::fprintf(stderr, "error: cannot open %s\n", path.data()); return 1; }
+        mine = sb53::estimateMoves(in, limits, 1.75, diags);
+    }
+    if (diags.hasErrors()) { report(diags); return 1; }
+
+    // --- reference ---
+    sb53::SubprocessRunner runner;
+    const auto proc = runner.run(
+        estimator, {"--config_file", configPath.string(), "dump-moves", std::string(path)},
+        std::chrono::minutes{10});
+    if (proc.exitCode != 0 || proc.launchFailed) {
+        std::fprintf(stderr, "error: reference estimator failed: %s\n", proc.stdErr.c_str());
+        return 1;
+    }
+    std::istringstream dump{proc.stdOut};
+    const auto theirs = sb53::MoveDumpParser::parse(dump, diags);
+
+    // --- compare ---
+    const auto sum = [](const std::vector<sb53::MoveSample>& v) {
+        double t = 0.0;
+        for (const auto& m : v) { t += m.duration; }
+        return t;
+    };
+    const double tMine = sum(mine);
+    const double tTheirs = sum(theirs);
+
+    std::printf("\n%-14s %10s %12s\n", "", "moves", "total time");
+    std::printf("%-14s %10zu %10.2fs\n", "reference", theirs.size(), tTheirs);
+    std::printf("%-14s %10zu %10.2fs\n", "built-in", mine.size(), tMine);
+    std::printf("%-14s %+10zd %+10.2fs  (%+.1f%%)\n", "difference",
+                static_cast<std::ptrdiff_t>(mine.size()) -
+                    static_cast<std::ptrdiff_t>(theirs.size()),
+                tMine - tTheirs,
+                tTheirs > 0.0 ? 100.0 * (tMine - tTheirs) / tTheirs : 0.0);
+
+    if (mine.size() == theirs.size() && !mine.empty()) {
+        double worst = 0.0, sumAbs = 0.0;
+        std::size_t worstAt = 0, within1pct = 0;
+        for (std::size_t i = 0; i < mine.size(); ++i) {
+            const double d = std::abs(mine[i].duration - theirs[i].duration);
+            sumAbs += d;
+            if (d > worst) { worst = d; worstAt = i; }
+            if (theirs[i].duration > 0 &&
+                d / theirs[i].duration < 0.01) { ++within1pct; }
+        }
+        std::printf("\nper-move duration:\n");
+        std::printf("  mean |diff|   : %.6f s\n", sumAbs / static_cast<double>(mine.size()));
+        std::printf("  worst         : %.6f s at move %zu "
+                    "(ref %.6f, ours %.6f)\n",
+                    worst, worstAt, theirs[worstAt].duration, mine[worstAt].duration);
+        std::printf("  within 1%%     : %zu / %zu (%.1f%%)\n", within1pct, mine.size(),
+                    100.0 * static_cast<double>(within1pct) /
+                        static_cast<double>(mine.size()));
+    } else {
+        std::printf("\nmove counts differ - fix extraction before comparing timings.\n");
+    }
+    return 0;
+}
+
 // Everything the CLI lets you override. Real profiles arrive with the database at M8;
 // these exist so the pipeline is usable and explorable now.
 struct Settings {
@@ -627,7 +723,7 @@ int main(int argc, char** argv)
         // Hard-coded defaults, overridable per-run. Real profiles come from the database
         // at M8; these exist so the planner's behaviour can be explored now. The values
         // are the README's own worked example, NOT a recommendation -- calibrate your
-        // own (ALGORITHM.md §3).
+        // own (ALGORITHM.md Â§3).
         sb53::ExtruderProfile extruder;
         sb53::FilamentProfile filament;
 
@@ -674,6 +770,25 @@ int main(int argc, char** argv)
         const auto exeDir =
             std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
         return sb53::web::runServe(port, exeDir, findEstimator);
+    }
+
+    // Development command: runs the built-in planner against the reference
+    // implementation on the same file. Exists to earn confidence in ADR-0007 before the
+    // subprocess is removed; not documented in --help.
+    if (args[0] == "kinematics-check") {
+        if (args.size() < 2) {
+            std::fprintf(stderr, "error: needs a G-code file\n");
+            return 64;
+        }
+        std::filesystem::path estimator;
+        for (std::size_t i = 2; i + 1 < args.size(); ++i) {
+            if (args[i] == "--estimator") { estimator = std::string(args[i + 1]); }
+        }
+        std::error_code ec;
+        const auto exeDir =
+            std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
+        if (estimator.empty()) { estimator = findEstimator(exeDir); }
+        return runKinematicsCheck(args[1], estimator);
     }
 
     if (args[0] == "compare") {

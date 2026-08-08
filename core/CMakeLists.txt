@@ -11,6 +11,7 @@ add_library(sb53_core STATIC
     src/GcodeRewriter.cpp
     src/GcodeScanner.cpp
     src/GcodeText.cpp
+    src/Kinematics.cpp
     src/Model.cpp
     src/TemperaturePlanner.cpp
     src/platform/SubprocessRunner.cpp
