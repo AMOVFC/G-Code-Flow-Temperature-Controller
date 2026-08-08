@@ -474,6 +474,10 @@ struct Settings {
     sb53::FilamentProfile filament;
     std::filesystem::path estimator;
     bool adjustPressureAdvance = false;
+
+    // Hard bounds on planned flow, independent of the calibration curve.
+    sb53::CubicMmPerSec maxFlow = 0.0;
+    sb53::CubicMmPerSec minFlow = 0.0;
 };
 
 void parseProfileFlags(const std::vector<std::string_view>& args, Settings& s)
@@ -510,6 +514,8 @@ void parseProfileFlags(const std::vector<std::string_view>& args, Settings& s)
         else if (k == "--cool-below")  { s.extruder.coolingLayerTime = number(v, 15.0); }
         else if (k == "--cool-drop")   { s.extruder.coolingMaxDrop = number(v, 0.0); }
         else if (k == "--adjust-pa")   { s.adjustPressureAdvance = true; }
+        else if (k == "--max-flow")    { s.maxFlow = number(v, 0.0); }
+        else if (k == "--min-flow")    { s.minFlow = number(v, 0.0); }
     }
 }
 
@@ -673,6 +679,8 @@ int runProcess(std::string_view inputPath, std::string outputPath,
         std::ofstream out{stagedPath, std::ios::binary};
         sb53::RewriteOptions options;
         options.adjustPressureAdvance = s.adjustPressureAdvance;
+        options.maxFlow = s.maxFlow;
+        options.minFlow = s.minFlow;
         stats = sb53::rewriteGcode(in, out, scan, analysis, plan, s.extruder, s.filament,
                                    diags, progress, options);
     }

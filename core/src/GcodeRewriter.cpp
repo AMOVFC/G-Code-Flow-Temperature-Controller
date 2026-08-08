@@ -1,10 +1,11 @@
-#include "sb53/GcodeRewriter.hpp"
+﻿#include "sb53/GcodeRewriter.hpp"
 
 #include "sb53/FlowAnalysis.hpp"
 #include "sb53/TemperaturePlanner.hpp"
 #include "sb53/Version.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <istream>
@@ -102,6 +103,15 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
 
     double usedFilament = 0.0;      // mm, the coordinate the plan is indexed by
     double slicerFeedrate = 0.0;    // most recent F word from the slicer
+
+    // Tool position, needed to derive each move's ACTUAL extrusion per millimetre.
+    // The slicer's ;WIDTH:/;HEIGHT: markers describe the nominal bead, but individual
+    // moves -- gap fill, overlaps, seams -- routinely extrude more than that, so a cap
+    // computed from the markers alone is not a cap at all. Measured on a real benchy:
+    // moves reached 120 mm3/s while the declared geometry implied about 105.
+    double posX = 0.0;
+    double posY = 0.0;
+    const double filamentArea = filamentCrossSection(options.filamentDiameter);
     double lastEmittedTemp = -1000.0;
     double lastEmittedPa = -1000.0;
     bool headerMarkerWritten = false;
@@ -250,7 +260,7 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
 
                 const double recommended = flowToFeedrate(budget, area);
 
-                // THE core safety property (ALGORITHM.md §2): speed is clamped downward
+                // THE core safety property (ALGORITHM.md Ã‚Â§2): speed is clamped downward
                 // only. If the slicer asked for something slower, that is respected.
                 if (recommended > 0.0 && recommended < slicerFeedrate) {
                     if (options.echoSlicerSpeed) {
@@ -268,6 +278,26 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
                      std::string(kCommentKeepSlicerSpeed));
             continue;
         }
+
+        // Replaces the value of a word in place, preserving everything else on the line.
+        const auto replaceWord = [](std::string_view source, char letter,
+                                    const std::string& value) {
+            const auto at = source.find(letter);
+            if (at == std::string_view::npos) {
+                return std::string(source);
+            }
+            auto end = at + 1;
+            while (end < source.size() &&
+                   (std::isdigit(static_cast<unsigned char>(source[end])) ||
+                    source[end] == '.' || source[end] == '-')) {
+                ++end;
+            }
+            std::string out;
+            out.append(source.substr(0, at + 1));
+            out.append(value);
+            out.append(source.substr(end));
+            return out;
+        };
 
         // --- an extruding move ----------------------------------------------
         //
@@ -288,7 +318,7 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
 
                 // Pressure advance: Klipper only, and only in features hidden inside the
                 // part. Changing it in a visible wall can leave surface bubbles
-                // (ALGORITHM.md §8) -- this gate is a correctness requirement.
+                // (ALGORITHM.md Ã‚Â§8) -- this gate is a correctness requirement.
                 if (options.adjustPressureAdvance && filament.adjustPressureAdvance &&
                     allowsPressureAdvanceChange(feature)) {
                     const double pa = temperatureToPressureAdvance(filament, *planned);
@@ -299,6 +329,63 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
                     }
                 }
             }
+        }
+
+        // --- per-move flow cap ----------------------------------------------
+        //
+        // The clamp above works from the slicer's declared bead geometry, which is only
+        // nominal. This one uses the move's OWN extrusion per millimetre, so it is exact
+        // and is what makes a hard flow limit actually hold:
+        //
+        //     flow = (extruded / distance) * velocity * filamentArea
+        //
+        // Rearranged, the fastest this move may go without exceeding the cap is
+        // velocity = cap / ((extruded / distance) * filamentArea).
+        if (detail::isExtrudingMove(line) && filamentArea > 0.0) {
+            const double nx = word(line, 'X').value_or(posX);
+            const double ny = word(line, 'Y').value_or(posY);
+            const double distance = std::hypot(nx - posX, ny - posY);
+            const double extruded = word(line, 'E').value_or(0.0);
+            posX = nx;
+            posY = ny;
+
+            const double effective = f.has_value() ? *f : slicerFeedrate;
+
+            if (distance > 1e-9 && extruded > 0.0 && effective > 0.0) {
+                const auto planned =
+                    plan.temperatureAtFilament(analysis.seconds, usedFilament);
+
+                double cap = options.maxFlow;   // 0 means "no explicit ceiling"
+                if (planned.has_value()) {
+                    double budget = temperatureToFlow(filament, *planned);
+                    if (options.maxFlow > 0.0) {
+                        budget = std::min(budget, options.maxFlow);
+                    }
+                    if (options.minFlow > 0.0) {
+                        budget = std::max(budget, options.minFlow);
+                    }
+                    cap = budget;
+                }
+
+                if (cap > 0.0) {
+                    const double perMm = (extruded / distance) * filamentArea;   // mm^3 per mm
+                    if (perMm > 1e-12) {
+                        const double maxFeedrate = 60.0 * cap / perMm;
+                        if (maxFeedrate < effective) {
+                            emitLine(replaceWord(line, 'F',
+                                                 formatNumber(std::round(maxFeedrate), 0))
+                                     + (f.has_value() ? "" : " F" +
+                                        formatNumber(std::round(maxFeedrate), 0)));
+                            ++stats.feedratesReduced;
+                            continue;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Keep the position tracker honest across travel and Z moves.
+            posX = word(line, 'X').value_or(posX);
+            posY = word(line, 'Y').value_or(posY);
         }
 
         emitLine(line);
