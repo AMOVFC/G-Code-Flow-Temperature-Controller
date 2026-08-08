@@ -27,11 +27,15 @@
 | | |
 |---|---|
 | G-code analysis, temperature planning, rewriting | ✅ working |
-| Command-line tool | ✅ working |
+| Local web interface with charts | ✅ working |
+| Command-line tool / slicer post-processing script | ✅ working |
 | Validated against the original tool | ✅ +0.9947 curve correlation |
+| Timing agrees with the slicer | ✅ within 1% (7m 15s vs 7m 19s) |
+| Fast-layer cooling | ✅ working, off by default |
+| Hard flow limit | ⚠️ experimental — read the warning in the UI |
 | **Validated by an actual print** | ❌ **not yet** |
 | Reads your existing `Config.sdb` profiles | ❌ not yet — calibration is entered by hand |
-| Graphical interface | ✅ local web UI (`flowtemp serve`) |
+| Own motion planner (no subprocess) | ❌ in progress, timing 13% off |
 
 > ⚠️ **Do not run output from this on a printer unattended.** It has never been physically
 > validated. Compare against the original tool's output first, and watch the first print.
@@ -177,6 +181,24 @@ Calibrating the three points is unchanged from the original tool; the visual met
 described under [Ideal Flow/Temperature Calibration](#ideal-flowtemperature-calibration)
 below.
 
+### Hard flow limit — experimental
+
+There is a **max flow** field with an on/off switch. Leave it **off** unless you are
+specifically testing it; off is the behaviour that was compared against the original tool.
+
+Being blunt about what it does and does not do:
+
+- **It does not hold flow at the number you enter.** Set 105 and the peak comes out around
+  69, because the binding constraint is what the filament can flow at the *planned
+  temperature*. The ceiling only removes moves that were escaping that budget entirely.
+- Switching it on takes feedrate reductions from about **2,000 to about 49,000** —
+  essentially every extruding move. Arguably more correct, but a large change.
+- Measured cost is roughly one second on a benchy. That is one measurement on one file.
+- No test print has been done with it.
+
+The **min flow** field is separate and unaffected by the switch. It stops the tool slowing
+the print below a floor, and never speeds anything up beyond what the slicer asked.
+
 ### Fast-layer cooling
 
 **New in the rewrite — the original tool has no equivalent.**
@@ -210,13 +232,35 @@ validated.
 
 Then open **http://127.0.0.1:8765** in your browser.
 
-Everything is on one page: paste in a G-code path, set your calibration, press **Analyse**
-to see the flow curve, the resulting temperature curve, and a per-layer timing chart —
+Everything is on one page: **Browse…** to a file, set your calibration, press **Analyse**
+to see the flow curve, the resulting temperature curve and a per-layer timing chart —
 then **Process & write** when it looks right.
 
-The layer-timing chart is the point of the page. It shows how long every layer takes and
-highlights which ones fall under your fast-layer cooling threshold, so you can pick that
-number from evidence instead of guessing.
+**The output is always a new file.** The Output field is a filename *suffix*
+(default `-flowtemp`), the page shows the exact path it will write as you type, and your
+original is never modified. A second run numbers the file rather than clobbering the
+first.
+
+### Reading the chart
+
+| control | |
+|---|---|
+| **Expand** | full-window view; Escape closes it |
+| **+ / − / Reset** | zoom the time axis |
+| drag | pan |
+| scroll wheel | zoom about the cursor |
+
+Below the chart, **worth a look** lists the moments that usually matter — peak flow, the
+hottest and coolest points (flagged when they hit the ends of your calibrated range), the
+sharpest one-second temperature swing, and the fastest layer. Click any of them to zoom
+straight there.
+
+That last one earns its place: on a test benchy it found **layer 167 completing in
+0.31 s**, which is precisely the situation fast-layer cooling exists to address.
+
+The layer-timing strip underneath shows how long every layer takes and highlights those
+below your cooling threshold, so that number can be chosen from evidence rather than
+guessed.
 
 > The server binds to **loopback only** and is not reachable from your network. It is
 > still a local process that reads and writes files anywhere you can, so do not expose the
@@ -255,6 +299,11 @@ anything.**
 ```
 
 Omit `--out` to overwrite in place — which is what a slicer post-processing hook expects.
+**This is the only path that overwrites anything.** The web UI always writes a new file
+beside the original.
+
+Other flags: `--cool-below` / `--cool-drop` for fast-layer cooling, `--min-flow` /
+`--max-flow` for flow bounds, `--adjust-pa` for pressure advance.
 
 Output is written to a scratch file and moved into place only on success, so a failed run
 can never leave a half-written file where your input was.
@@ -353,9 +402,35 @@ deletes it if you close its window, so your original is never given to it direct
 
 ## Known limitations
 
-- Profiles are not read from `Config.sdb` yet — calibration is entered by hand.
-- The web UI takes a file **path**; there is no file picker, because a browser cannot
-  hand a server a local path.
+- **Profiles are not read from `Config.sdb` yet** — calibration is entered by hand. Read
+  yours out with `python tools/dump-profiles.py`.
+- **The hard flow limit is experimental** — see the section above.
+- **The motion planner still shells out to `klipper_estimator`.** An in-process
+  replacement is underway ([ADR-0007](docs/adr/0007-own-motion-planner.md)) so the tool
+  becomes a single artefact that can be *linked* into an OrcaSlicer plugin rather than
+  spawned. Move extraction is exact; timing is 13% off and not yet usable.
+- **Reported "estimated time" is the input's, not the output's** — there is no second
+  estimator pass, and the `; estimated printing time` comment in the output is not
+  rewritten.
+- Windows only. The core library is portable and builds on Linux, but process execution
+  is not implemented there.
+- Multi-tool and multi-material printing are not supported.
+- Arc moves (`G2`/`G3`) work but are slow — the estimator subdivides them.
+
+## What was found along the way
+
+Building this surfaced several defects in the original tool, all documented in
+[docs/legacy/known-bugs.md](docs/legacy/known-bugs.md). Three worth knowing if you still
+use it:
+
+- **It fails silently.** Seven of nine processed sample files carried the `; Edited by`
+  header and an *empty* estimated-time field but contained **no `M104` commands at all** —
+  they look processed and are not. Worse, the header makes its own re-processing guard
+  reject the file, so it cannot simply be re-run.
+- **The Speed↔Quality scale is inverted** relative to this tool. Copying
+  `SPEED_QUALITY_OPT` across without subtracting from 10 gives prints ~14 °C colder.
+- **Saving a filament profile writes the wrong control's value**, so the speed/quality
+  setting silently does not persist.
 - Windows only. The core library is portable and builds on Linux, but process execution is
   not implemented there yet.
 - Multi-tool and multi-material printing are not supported.

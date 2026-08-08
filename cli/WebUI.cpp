@@ -149,6 +149,24 @@ background:color-mix(in srgb,var(--warn) 10%,transparent)}
 .pick input{flex:1;min-width:0}
 .pick button{white-space:nowrap;padding:7px 12px;font-weight:500}
 .empty{color:var(--muted);text-align:center;padding:60px 20px}
+.charthead{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.charthead .legend{margin:0}
+.chartbtns{margin-left:auto;display:flex;gap:6px}
+.chartbtns button{padding:5px 10px;font-size:12px;font-weight:500}
+.expanded{position:fixed;inset:12px;z-index:50;overflow:auto;
+box-shadow:0 12px 48px rgba(0,0,0,.35)}
+.expanded canvas{height:calc(100vh - 260px)}
+.moments{margin-top:10px;font-size:12px}
+.moments h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;
+letter-spacing:.04em;color:var(--muted);font-weight:600}
+.moment{display:flex;gap:10px;align-items:baseline;padding:4px 6px;border-radius:5px;
+cursor:pointer}
+.moment:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.moment b{font-variant-numeric:tabular-nums;color:var(--accent);min-width:56px}
+.moment .why{color:var(--muted)}
+.dot{position:absolute;width:9px;height:9px;border-radius:50%;pointer-events:none;
+transform:translate(-50%,-50%);border:2px solid var(--panel)}
+.chartwrap{position:relative}
 </style>
 )HTML";
 
@@ -279,13 +297,24 @@ constexpr std::string_view kPagePart2 = R"HTML(</head>
   <div>
     <div class="panel" style="margin-bottom:16px">
       <div id="messages"></div>
-      <div class="legend">
-        <span><i class="key" style="border-top:3px solid var(--flow)"></i>flow mm&sup3;/s</span>
-        <span><i class="key" style="border-top:3px solid var(--temp)"></i>temperature &deg;C</span>
-        <span><i class="key" style="border-top:3px dashed var(--drop)"></i>layer-time cooling</span>
+      <div class="charthead">
+        <div class="legend">
+          <span><i class="key" style="border-top:3px solid var(--flow)"></i>flow mm&sup3;/s</span>
+          <span><i class="key" style="border-top:3px solid var(--temp)"></i>temperature &deg;C</span>
+          <span><i class="key" style="border-top:3px dashed var(--drop)"></i>layer cooling</span>
+        </div>
+        <div class="chartbtns">
+          <button type="button" class="secondary" id="zoomOut">&minus;</button>
+          <button type="button" class="secondary" id="zoomIn">+</button>
+          <button type="button" class="secondary" id="zoomReset">Reset</button>
+          <button type="button" class="secondary" id="expand">Expand</button>
+        </div>
       </div>
-      <canvas id="chart" width="1200" height="680"></canvas>
-      <div class="empty" id="empty">Enter a file path and press Analyse.</div>
+      <div class="chartwrap" id="chartwrap">
+        <canvas id="chart" width="1400" height="760"></canvas>
+      </div>
+      <div class="empty" id="empty">Choose a file and press Analyse.</div>
+      <div class="moments" id="moments"></div>
     </div>
     <div class="panel">
       <table id="stats"></table>
@@ -356,8 +385,9 @@ $('#form').addEventListener('submit', async e=>{
   if(!j) return;
   data = j;
   $('#empty').style.display='none';
+  view={from:0,to:1};
   if(j.warning) msg('warn', j.warning);
-  draw(); stats(j);
+  draw(); stats(j); renderMoments();
 });
 
 $('#process').addEventListener('click', async ()=>{
@@ -392,7 +422,14 @@ function draw(){
   g.clearRect(0,0,W,H);
   if(!data || !data.seconds.length) return;
 
-  const S = data.seconds;
+  // Only the visible slice of the timeline is drawn, so zooming actually reveals detail
+  // rather than just stretching the same polyline.
+  const all = data.seconds;
+  const lo = Math.floor(view.from*(all.length-1));
+  const hi = Math.ceil(view.to*(all.length-1));
+  const S = all.slice(Math.max(0,lo), Math.min(all.length, hi+1));
+  if(S.length < 2) return;
+
   const padL=62, padR=62, padT=18, padB=26;
   const mainH = Math.round(H*0.62), gap=34;
   const layerTop = padT+mainH+gap, layerH = H-layerTop-padB;
@@ -401,9 +438,10 @@ function draw(){
   const maxFlow = Math.max(...S.map(p=>p.flow), 1);
   const tLo = Math.min(...S.map(p=>p.temp)) - 3;
   const tHi = Math.max(...S.map(p=>p.temp)) + 3;
+  const tStart = S[0].t;
   const tEnd = S[S.length-1].t;
 
-  const x = t => padL + (t/tEnd)*plotW;
+  const x = t => padL + ((t-tStart)/Math.max(1e-9,tEnd-tStart))*plotW;
   const yF = v => padT + mainH - (v/maxFlow)*mainH;
   const yT = v => padT + mainH - ((v-tLo)/(tHi-tLo||1))*mainH;
 
@@ -422,8 +460,14 @@ function draw(){
   }
   g.textAlign='center'; g.fillStyle=muted;
   for(let i=0;i<=6;i++){
-    const t=(tEnd/6)*i;
+    const t=tStart+((tEnd-tStart)/6)*i;
     g.fillText(fmtTime(t), x(t), padT+mainH+16);
+  }
+  if(view.from>0 || view.to<1){
+    g.textAlign='right';
+    g.fillText('showing '+fmtTime(tStart)+'–'+fmtTime(tEnd)
+      +'  (drag to pan, scroll to zoom)', W-padR, padT-4);
+    g.textAlign='center';
   }
 
   const plot=(key, colour, proj, dash)=>{
@@ -437,6 +481,22 @@ function draw(){
     plot('drop', cs.getPropertyValue('--drop').trim(),
          v=> padT+mainH-(v/Math.max(...S.map(p=>p.drop),1))*mainH*0.28, [5,4]);
   }
+
+  // Key moments, marked where they fall in the current view.
+  keyMoments().forEach(k=>{
+    if(k.t < tStart || k.t > tEnd) return;
+    const X=x(k.t);
+    g.strokeStyle=cs.getPropertyValue('--muted').trim();
+    g.setLineDash([2,3]); g.globalAlpha=.6;
+    g.beginPath(); g.moveTo(X,padT); g.lineTo(X,padT+mainH); g.stroke();
+    g.setLineDash([]); g.globalAlpha=1;
+    g.fillStyle=cs.getPropertyValue('--accent').trim();
+    g.beginPath(); g.arc(X, padT+8, 4, 0, Math.PI*2); g.fill();
+    g.save(); g.translate(X+5, padT+6); g.textAlign='left';
+    g.fillStyle=muted; g.font='10px ui-sans-serif,sans-serif';
+    g.fillText(k.label, 0, 0); g.restore();
+    g.font='11px ui-sans-serif,sans-serif';
+  });
 
   // layer-time strip: the evidence for choosing a cooling threshold
   const L = data.layers;
@@ -463,6 +523,111 @@ function draw(){
   }
 }
 window.addEventListener('resize', ()=>{ if(data) draw(); });
+
+// --- view controls ---------------------------------------------------------
+let view = {from:0, to:1};   // fraction of the timeline currently shown
+
+function setView(from,to){
+  const span = Math.max(0.02, to-from);          // never zoom past ~2% of the print
+  view.from = Math.max(0, Math.min(1-span, from));
+  view.to = view.from + span;
+  draw();
+}
+function zoom(factor){
+  const mid=(view.from+view.to)/2, span=(view.to-view.from)*factor;
+  setView(mid-span/2, mid+span/2);
+}
+$('#zoomIn').addEventListener('click', ()=>zoom(0.5));
+$('#zoomOut').addEventListener('click', ()=>zoom(2));
+$('#zoomReset').addEventListener('click', ()=>setView(0,1));
+$('#expand').addEventListener('click', ()=>{
+  const panel = $('#chartwrap').closest('.panel');
+  panel.classList.toggle('expanded');
+  $('#expand').textContent = panel.classList.contains('expanded') ? 'Close' : 'Expand';
+  setTimeout(draw, 30);
+});
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape'){
+    const panel=$('#chartwrap').closest('.panel');
+    if(panel.classList.contains('expanded')){ panel.classList.remove('expanded');
+      $('#expand').textContent='Expand'; setTimeout(draw,30); }
+  }
+});
+// Drag to pan, wheel to zoom about the cursor.
+(function(){
+  const c=$('#chart'); let dragging=false, lastX=0;
+  c.addEventListener('mousedown', e=>{ dragging=true; lastX=e.offsetX; });
+  window.addEventListener('mouseup', ()=>{ dragging=false; });
+  c.addEventListener('mousemove', e=>{
+    if(!dragging||!data) return;
+    const frac=(e.offsetX-lastX)/c.clientWidth*(view.to-view.from);
+    lastX=e.offsetX; setView(view.from-frac, view.to-frac);
+  });
+  c.addEventListener('wheel', e=>{
+    if(!data) return; e.preventDefault();
+    const at=view.from+(e.offsetX/c.clientWidth)*(view.to-view.from);
+    const f=e.deltaY>0?1.25:0.8;
+    setView(at-(at-view.from)*f, at+(view.to-at)*f);
+  }, {passive:false});
+})();
+
+// --- key moments -----------------------------------------------------------
+//
+// The things a user actually wants to look at, rather than every local wiggle:
+// where flow peaks, where the plan runs into the ends of the calibrated band, the
+// sharpest temperature swing, and the fastest layer.
+function keyMoments(){
+  const S=data.seconds; if(!S.length) return [];
+  const out=[];
+  const at = i => S[i].t;
+
+  let pf=0, pi=0;
+  S.forEach((p,i)=>{ if(p.flow>pf){pf=p.flow; pi=i;} });
+  out.push({t:at(pi), i:pi, label:'peak flow',
+            why:pf.toFixed(1)+' mm³/s — the hardest the hotend works'});
+
+  let hot=-1e9, hi=0, cold=1e9, ci=0;
+  S.forEach((p,i)=>{ if(p.temp>hot){hot=p.temp; hi=i;} if(p.temp<cold){cold=p.temp; ci=i;} });
+  out.push({t:at(hi), i:hi, label:'hottest',
+            why:hot.toFixed(1)+' °C'+(hot>=data.maxTemp-0.05?' — at the top of your calibrated range':'')});
+  out.push({t:at(ci), i:ci, label:'coolest',
+            why:cold.toFixed(1)+' °C'+(cold<=data.minTemp+0.05?' — at the bottom of your calibrated range':'')});
+
+  let worst=0, wi=0;
+  for(let i=1;i<S.length;i++){
+    const d=Math.abs(S[i].temp-S[i-1].temp);
+    if(d>worst){worst=d; wi=i;}
+  }
+  if(worst>0.2){
+    out.push({t:at(wi), i:wi, label:'sharpest swing',
+              why:worst.toFixed(1)+' °C in one second — check this area on the print'});
+  }
+
+  if(data.layers && data.layers.length){
+    let fastest=1e9, fi=0;
+    data.layers.forEach((l,i)=>{ if(l.duration>0 && l.duration<fastest){fastest=l.duration; fi=i;} });
+    // Layer index to a time: layers are sequential, so scale by the layer count.
+    const frac = fi/Math.max(1,data.layers.length-1);
+    out.push({t:S[S.length-1].t*frac, i:Math.floor(frac*(S.length-1)), label:'fastest layer',
+              why:'layer '+(fi+1)+' at '+fastest.toFixed(2)+'s — least time to cool before the next one lands'});
+  }
+  return out.sort((a,b)=>a.t-b.t);
+}
+
+function renderMoments(){
+  const m=keyMoments();
+  if(!m.length){ $('#moments').innerHTML=''; return; }
+  $('#moments').innerHTML = '<h4>worth a look</h4>' + m.map((k,idx)=>
+    '<div class="moment" data-i="'+idx+'"><b>'+fmtTime(k.t)+'</b>'
+    +'<span>'+k.label+'</span><span class="why">'+k.why+'</span></div>').join('');
+  [...document.querySelectorAll('.moment')].forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const k=m[+el.dataset.i], tEnd=data.seconds[data.seconds.length-1].t;
+      const c=k.t/tEnd, span=0.12;
+      setView(c-span/2, c+span/2);
+    });
+  });
+}
 </script>
 </body>
 </html>)HTML";
