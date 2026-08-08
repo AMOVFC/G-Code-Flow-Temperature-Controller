@@ -1,4 +1,4 @@
-// The local web UI.
+﻿// The local web UI.
 //
 // Frontend only. Everything here calls into sb53_core through the same interfaces the
 // CLI uses; no algorithm logic lives in this file (ADR-0002).
@@ -82,7 +82,9 @@ std::string chooseGcodeFile()
     return static_cast<unsigned long long>(now) * 1000ull + counter.fetch_add(1);
 }
 
-constexpr std::string_view kPage = R"HTML(<!doctype html>
+// MSVC caps a single string literal at about 16 KB, which this page has outgrown, so it
+// is stored in parts and joined once at startup.
+constexpr std::string_view kPagePart1 = R"HTML(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -135,12 +137,22 @@ margin-bottom:8px}
 .key{display:inline-block;width:22px;height:0;border-top-width:3px;vertical-align:middle;
 margin-right:5px}
 .hint{font-size:12px;color:var(--muted);margin:-4px 0 10px}
+.check{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.check input{width:auto;flex:0 0 auto}
+.check span{margin:0;font-size:13px;color:var(--ink);font-weight:600}
+.warnbox{border:1px solid var(--warn);border-radius:7px;padding:10px 12px;
+font-size:12px;line-height:1.45;color:var(--ink);margin-bottom:10px;
+background:color-mix(in srgb,var(--warn) 10%,transparent)}
+.warnbox ul{margin:6px 0 6px;padding-left:18px}
+.warnbox li{margin-bottom:4px}
 .pick{display:flex;gap:6px}
 .pick input{flex:1;min-width:0}
 .pick button{white-space:nowrap;padding:7px 12px;font-weight:500}
 .empty{color:var(--muted);text-align:center;padding:60px 20px}
 </style>
-</head>
+)HTML";
+
+constexpr std::string_view kPagePart2 = R"HTML(</head>
 <body>
 <header>
   <h1>G-Code Flow &amp; Temperature Controller</h1>
@@ -212,13 +224,31 @@ margin-right:5px}
 
     <fieldset>
       <legend>Flow limits</legend>
+      <label class="check"><input type="checkbox" name="hardCap" id="hardCap" value="1">
+        <span>Enforce a hard flow limit</span></label>
       <div class="row2">
         <label><span>min flow mm&sup3;/s</span><input name="minFlow" value="0" inputmode="decimal"></label>
-        <label><span>max flow mm&sup3;/s</span><input name="maxFlow" value="0" inputmode="decimal"></label>
+        <label><span>max flow mm&sup3;/s</span><input name="maxFlow" value="105" inputmode="decimal"></label>
       </div>
-      <p class="hint">0 = no limit. <b>Max</b> caps flow when the hotend, not the
-      filament, is the constraint. <b>Min</b> stops the tool slowing the print below a
-      floor &mdash; it never speeds anything up beyond what the slicer asked.</p>
+      <div class="warnbox">
+        <b>The hard limit is not properly validated. Treat it as experimental.</b>
+        <ul>
+          <li>It does not hold flow at your number. Set 105 and the peak comes out
+              around 69, because the real constraint is what the filament can flow at
+              the planned temperature. The limit only removes moves that were escaping
+              the budget entirely.</li>
+          <li>Switching it on takes feedrate reductions from about 2,000 to about
+              49,000 &mdash; essentially every extruding move. That is arguably more
+              correct, but it is a big change and no test print has been done with it.</li>
+          <li>Measured cost is roughly one second on a benchy, but that is one
+              measurement on one file.</li>
+        </ul>
+        Leave it off unless you are specifically testing it. Off is the behaviour that
+        was compared against the old tool.
+      </div>
+      <p class="hint"><b>Min flow</b> is independent of the switch and stops the tool
+      slowing the print below a floor. It never speeds anything up beyond what the
+      slicer asked.</p>
     </fieldset>
 
     <fieldset>
@@ -259,8 +289,10 @@ margin-right:5px}
     </div>
   </div>
 </main>
-<script>
-const $ = s => document.querySelector(s);
+)HTML";
+
+constexpr std::string_view kPagePart3 = R"HTML(
+<script>const $ = s => document.querySelector(s);
 let data = null;
 
 fetch('/api/version').then(r=>r.json()).then(v=>{$('#ver').textContent = 'v'+v.version;});
@@ -415,6 +447,15 @@ window.addEventListener('resize', ()=>{ if(data) draw(); });
 </body>
 </html>)HTML";
 
+// Joined once; the page is served many times but assembled only here.
+const std::string& fullPage()
+{
+    static const std::string page =
+        std::string(kPagePart1) + std::string(kPagePart2) + std::string(kPagePart3);
+    return page;
+}
+
+
 // Builds profiles from the submitted form.
 struct FormSettings {
     ExtruderProfile extruder;
@@ -548,7 +589,10 @@ FormSettings readSettings(const Request& r)
     s.zVelocity = r.number("zVel", 0.0);
     s.zAcceleration = r.number("zAccel", 0.0);
     s.minFlow = r.number("minFlow", 0.0);
-    s.maxFlow = r.number("maxFlow", 0.0);
+
+    // The ceiling only applies when the switch is on. An unchecked box sends no field
+    // at all, so its absence is the "off" signal.
+    s.maxFlow = r.field("hardCap").empty() ? 0.0 : r.number("maxFlow", 0.0);
 
     const auto est = r.field("estimator");
     if (!est.empty()) {
@@ -723,7 +767,7 @@ int runServe(unsigned short port, const std::filesystem::path& exeDir,
 
     const bool ok = serve(port, [&](const Request& r) -> Response {
         if (r.path == "/" || r.path == "/index.html") {
-            return Response::html(std::string(kPage));
+            return Response::html(fullPage());
         }
 
         if (r.path == "/api/version") {
