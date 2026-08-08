@@ -263,8 +263,11 @@ constexpr std::string_view kPagePart2 = R"HTML(</head>
 
     <fieldset>
       <legend>Output</legend>
-      <label><span>Write to (blank = overwrite input)</span>
-        <input name="out" id="out" placeholder="leave blank to overwrite"></label>
+      <label><span>Filename suffix</span>
+        <input name="suffix" id="suffix" value="-flowtemp"></label>
+      <p class="hint">A new file is written alongside the original, with this appended to
+      its name. <b>The original is never modified.</b><br>
+      <code id="outPreview">&mdash;</code></p>
     </fieldset>
 
     <div class="actions">
@@ -326,10 +329,26 @@ $('#browse').addEventListener('click', async ()=>{
     // The dialog opens on the machine running the server, which is this machine.
     const r = await fetch('/api/browse', {method:'POST'});
     const j = await r.json();
-    if(j.path){ $('#path').value = j.path; clearMsg(); }
+    if(j.path){ $('#path').value = j.path; clearMsg(); updateOutPreview(); }
   }catch(e){ msg('err','Could not open the file dialog: '+e); }
   finally{ btn.disabled=false; btn.textContent=old; }
 });
+
+// Show exactly which file will be written, so it is never a surprise.
+function updateOutPreview(){
+  const p = $('#path').value.trim();
+  const sfx = $('#suffix').value || '-flowtemp';
+  if(!p){ $('#outPreview').textContent = '—'; return; }
+  const cut = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+  const dir = cut >= 0 ? p.slice(0, cut+1) : '';
+  const name = cut >= 0 ? p.slice(cut+1) : p;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0,dot) : name;
+  const ext  = dot > 0 ? name.slice(dot) : '.gcode';
+  $('#outPreview').textContent = 'writes: ' + dir + stem + sfx + ext;
+}
+$('#path').addEventListener('input', updateOutPreview);
+$('#suffix').addEventListener('input', updateOutPreview);
 
 $('#form').addEventListener('submit', async e=>{
   e.preventDefault();
@@ -342,8 +361,9 @@ $('#form').addEventListener('submit', async e=>{
 });
 
 $('#process').addEventListener('click', async ()=>{
-  if(!confirm('Write the processed G-code?\n\nThis tool has not been validated by test '
-    +'prints. Check the output before sending it to a printer.')) return;
+  if(!confirm('Write the processed G-code?\n\nA NEW file is created; your original is '
+    +'not modified.\n\nThis tool has not been validated by test prints. Check the '
+    +'output before sending it to a printer.')) return;
   const j = await call('/api/process', $('#process'));
   if(!j) return;
   msg('ok', 'Wrote '+j.output+'\n'+j.temperatureCommands+' temperature commands, '
@@ -789,10 +809,39 @@ int runServe(unsigned short port, const std::filesystem::path& exeDir,
             }
 
             if (r.path == "/api/process") {
-                std::string outPath = r.field("out");
-                if (outPath.empty()) {
-                    outPath = r.field("path");
+                // A new file, always. The CLI still overwrites in place because a
+                // slicer post-processing hook requires it, but nothing in this UI should
+                // be able to destroy the file the user just picked.
+                const std::filesystem::path input{r.field("path")};
+                std::string suffix = r.field("suffix");
+                if (suffix.empty()) {
+                    suffix = "-flowtemp";
                 }
+
+                auto candidate = input.parent_path() /
+                                 (input.stem().string() + suffix +
+                                  (input.extension().empty() ? ".gcode"
+                                                             : input.extension().string()));
+
+                // Belt and braces: if the suffix somehow resolves back to the input,
+                // refuse rather than overwrite.
+                std::error_code same;
+                if (std::filesystem::equivalent(candidate, input, same)) {
+                    return Response::error(
+                        400, "That suffix would overwrite the original file. Choose a "
+                             "different one.");
+                }
+
+                // Never clobber a previous run either -- number it instead.
+                for (int n = 2; std::filesystem::exists(candidate) && n < 1000; ++n) {
+                    candidate = input.parent_path() /
+                                (input.stem().string() + suffix + "-" + std::to_string(n) +
+                                 (input.extension().empty()
+                                      ? ".gcode"
+                                      : input.extension().string()));
+                }
+
+                const std::string outPath = candidate.string();
 
                 std::error_code ec;
                 const auto scratch =
