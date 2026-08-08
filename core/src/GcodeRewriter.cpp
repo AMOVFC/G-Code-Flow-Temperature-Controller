@@ -341,7 +341,12 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
         //
         // Rearranged, the fastest this move may go without exceeding the cap is
         // velocity = cap / ((extruded / distance) * filamentArea).
-        if (detail::isExtrudingMove(line) && filamentArea > 0.0) {
+        //
+        // Engaged ONLY when an explicit maxFlow is set. Applying it unconditionally
+        // clamps essentially every move to the temperature budget -- 53,119 reductions
+        // against 2,308 -- which is arguably more correct but is a large behavioural
+        // change that has not been justified against a real print. Opt in.
+        if (options.maxFlow > 0.0 && detail::isExtrudingMove(line) && filamentArea > 0.0) {
             const double nx = word(line, 'X').value_or(posX);
             const double ny = word(line, 'Y').value_or(posY);
             const double distance = std::hypot(nx - posX, ny - posY);
