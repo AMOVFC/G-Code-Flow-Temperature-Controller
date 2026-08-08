@@ -130,6 +130,13 @@ struct ScanResult {
 
     std::size_t totalLines = 0;
 
+    // The slicer's own print-time estimate, in seconds, or 0 if absent.
+    //
+    // Kept because it is an independent second opinion on our own timing. A large
+    // disagreement almost always means the printer config does not describe this
+    // machine, which silently corrupts every flow and temperature number downstream.
+    Seconds slicerEstimatedTime = 0.0;
+
     // Layer starts, in order. Used for layer-time cooling (ALGORITHM.md §5.5).
     std::vector<LayerMark> layers;
 

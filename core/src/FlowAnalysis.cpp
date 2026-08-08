@@ -68,6 +68,37 @@ double filamentCrossSection(Millimetres diameter) noexcept
     return std::numbers::pi * radius * radius;
 }
 
+void checkTimingAgainstSlicer(const ScanResult& scan, const SourceAnalysis& analysis,
+                              DiagnosticList& diagnostics)
+{
+    if (scan.slicerEstimatedTime <= 0.0 || analysis.totalTime <= 0.0) {
+        return;   // nothing to compare against
+    }
+
+    const double ratio = analysis.totalTime / scan.slicerEstimatedTime;
+
+    // Slicer estimates are crude and routinely differ by 10-20%, so the threshold is
+    // deliberately loose. It is here to catch a config describing the wrong machine --
+    // which produces errors of 50% or more -- not to police normal disagreement.
+    if (ratio < 1.4 && ratio > 0.6) {
+        return;
+    }
+
+    const auto minutes = [](double s) {
+        return std::to_string(static_cast<int>(s) / 60) + "m " +
+               std::to_string(static_cast<int>(s) % 60) + "s";
+    };
+
+    diagnostics.add(warning(
+        Code::PrinterConfigMismatch,
+        "Computed print time (" + minutes(analysis.totalTime) + ") disagrees sharply "
+        "with the slicer's estimate (" + minutes(scan.slicerEstimatedTime) + "). "
+        "The loaded config.json probably describes a different printer. "
+        "Flow and temperature are derived from these timings, so the result will look "
+        "correct but be wrong. Check max_velocity and max_acceleration against your "
+        "printer.cfg before using this file."));
+}
+
 std::vector<MoveSample> MoveDumpParser::parse(std::istream& in,
                                               DiagnosticList& diagnostics)
 {

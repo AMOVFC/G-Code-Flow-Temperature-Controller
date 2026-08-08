@@ -49,5 +49,8 @@ namespace detail {
 [[nodiscard]] std::optional<std::string_view> commentValue(std::string_view line,
                                                            std::string_view key);
 
+// Parses a slicer duration such as "1d 2h 3m 4s" into seconds. Any subset, any order.
+[[nodiscard]] double parseDuration(std::string_view text);
+
 } // namespace detail
 } // namespace sb53

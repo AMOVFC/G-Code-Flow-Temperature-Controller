@@ -20,6 +20,20 @@ namespace sb53 {
 struct RewriteOptions {
     Millimetres filamentDiameter = 1.75;
 
+    // Hard limits on the flow the tool will plan for, independent of the filament
+    // calibration curve.
+    //
+    // `maxFlow` is a ceiling: useful when the hotend, not the filament, is the binding
+    // constraint. Zero means "no ceiling beyond the calibration".
+    //
+    // `minFlow` is a FLOOR on the flow budget used to compute feedrates, so the tool
+    // will not slow the print below it however cold the plan goes. Without this a
+    // conservative temperature plan can drag a whole print down to a crawl. It never
+    // makes a move FASTER than the slicer asked -- the clamp in ALGORITHM.md §2 still
+    // applies -- it only limits how far down the reduction may go.
+    CubicMmPerSec maxFlow = 0.0;
+    CubicMmPerSec minFlow = 0.0;
+
     // Klipper only, and only in concealed features -- see allowsPressureAdvanceChange().
     bool adjustPressureAdvance = false;
 

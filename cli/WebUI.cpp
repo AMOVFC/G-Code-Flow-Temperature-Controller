@@ -192,6 +192,31 @@ margin-right:5px}
     </fieldset>
 
     <fieldset>
+      <legend>Printer limits <span style="font-weight:400;text-transform:none">(blank = use config.json)</span></legend>
+      <div class="row2">
+        <label><span>max velocity mm/s</span><input name="maxVel" placeholder="from config" inputmode="decimal"></label>
+        <label><span>max accel mm/s&sup2;</span><input name="maxAccel" placeholder="from config" inputmode="decimal"></label>
+      </div>
+      <label><span>square corner velocity mm/s</span><input name="scv" placeholder="from config" inputmode="decimal"></label>
+      <p class="hint">These must match your printer.cfg. If they are wrong, the print time
+      and every flow figure derived from it are wrong &mdash; and nothing looks amiss.
+      <br><b>Note:</b> the Z and extruder limits inside <code>move_checkers</code> still
+      come from config.json and are not overridden here, so a config for the wrong
+      machine is only partly corrected. Fix the file for a real setup.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Flow limits</legend>
+      <div class="row2">
+        <label><span>min flow mm&sup3;/s</span><input name="minFlow" value="0" inputmode="decimal"></label>
+        <label><span>max flow mm&sup3;/s</span><input name="maxFlow" value="0" inputmode="decimal"></label>
+      </div>
+      <p class="hint">0 = no limit. <b>Max</b> caps flow when the hotend, not the
+      filament, is the constraint. <b>Min</b> stops the tool slowing the print below a
+      floor &mdash; it never speeds anything up beyond what the slicer asked.</p>
+    </fieldset>
+
+    <fieldset>
       <legend>Fast-layer cooling</legend>
       <div class="row2">
         <label><span>layers under (s)</span><input name="coolBelow" value="5" inputmode="decimal"></label>
@@ -390,7 +415,53 @@ struct FormSettings {
     ExtruderProfile extruder;
     FilamentProfile filament;
     std::filesystem::path estimator;
+
+    // Blank in the form means "leave config.json alone"; zero is the sentinel.
+    double maxVelocity = 0.0;
+    double maxAcceleration = 0.0;
+    double squareCornerVelocity = 0.0;
+
+    CubicMmPerSec minFlow = 0.0;
+    CubicMmPerSec maxFlow = 0.0;
+
+    [[nodiscard]] bool overridesPrinterLimits() const noexcept
+    {
+        return maxVelocity > 0.0 || maxAcceleration > 0.0 || squareCornerVelocity > 0.0;
+    }
 };
+
+// Rewrites the numeric fields of a config.json in place, leaving everything else --
+// notably move_checkers -- untouched. A targeted substitution rather than a re-serialise,
+// so nothing the estimator understands is silently dropped.
+std::string overrideConfigValue(std::string json, std::string_view key, double value)
+{
+    if (!(value > 0.0)) {
+        return json;
+    }
+    const std::string needle = "\"" + std::string(key) + "\"";
+
+    // Only the top-level occurrence: the same key names appear inside move_checkers,
+    // and those describe different limits entirely.
+    const auto checkers = json.find("\"move_checkers\"");
+    const auto at = json.find(needle);
+    if (at == std::string::npos || (checkers != std::string::npos && at > checkers)) {
+        return json;
+    }
+    const auto colon = json.find(':', at + needle.size());
+    if (colon == std::string::npos) {
+        return json;
+    }
+    auto valueStart = json.find_first_not_of(" \t", colon + 1);
+    auto valueEnd = json.find_first_of(",}\r\n", valueStart);
+    if (valueStart == std::string::npos || valueEnd == std::string::npos) {
+        return json;
+    }
+
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.6g", value);
+    json.replace(valueStart, valueEnd - valueStart, buf);
+    return json;
+}
 
 FormSettings readSettings(const Request& r)
 {
@@ -410,6 +481,12 @@ FormSettings readSettings(const Request& r)
     s.extruder.coolingMaxDrop = r.number("coolDrop", 0.0);
     s.extruder.startMacro = "PRINT_START";
     s.extruder.temperatureToken = "EXTRUDER_TEMP";
+
+    s.maxVelocity = r.number("maxVel", 0.0);
+    s.maxAcceleration = r.number("maxAccel", 0.0);
+    s.squareCornerVelocity = r.number("scv", 0.0);
+    s.minFlow = r.number("minFlow", 0.0);
+    s.maxFlow = r.number("maxFlow", 0.0);
 
     const auto est = r.field("estimator");
     if (!est.empty()) {
@@ -473,7 +550,7 @@ RunResult runToPlan(const Request& request, const std::filesystem::path& exeDir,
         out.error = "Could not find klipper_estimator.exe. Give its full path.";
         return out;
     }
-    const auto config = out.estimator.parent_path() / "config.json";
+    auto config = out.estimator.parent_path() / "config.json";
     if (!std::filesystem::exists(config, ec)) {
         out.error = "No config.json beside the estimator (" + config.string() + ").";
         return out;
@@ -494,6 +571,27 @@ RunResult runToPlan(const Request& request, const std::filesystem::path& exeDir,
                          ("sb53-web-" + std::to_string(uniqueSuffix()));
     std::filesystem::create_directories(scratch, ec);
     const auto bodyPath = scratch / "body.gcode";
+
+    // Printer-limit overrides: write an amended config into the scratch directory rather
+    // than touching the user's file. Only the top-level numbers are substituted, so
+    // move_checkers survive intact.
+    if (out.settings.overridesPrinterLimits()) {
+        std::ifstream src{config, std::ios::binary};
+        std::string json((std::istreambuf_iterator<char>(src)), {});
+        json = overrideConfigValue(std::move(json), "max_velocity",
+                                   out.settings.maxVelocity);
+        json = overrideConfigValue(std::move(json), "max_acceleration",
+                                   out.settings.maxAcceleration);
+        json = overrideConfigValue(std::move(json), "square_corner_velocity",
+                                   out.settings.squareCornerVelocity);
+
+        const auto amended = scratch / "config.json";
+        std::ofstream dst{amended, std::ios::binary};
+        dst << json;
+        dst.close();
+        config = amended;
+    }
+
     {
         std::ifstream in{path, std::ios::binary};
         std::ofstream body{bodyPath, std::ios::binary};
@@ -532,6 +630,10 @@ RunResult runToPlan(const Request& request, const std::filesystem::path& exeDir,
     }
 
     out.analysis = analyseFlow(moves);
+
+    // Independent cross-check on the printer config: the slicer's own estimate.
+    checkTimingAgainstSlicer(out.scan, out.analysis, diags);
+
     out.plan = planTemperature(out.analysis, out.settings.extruder, out.settings.filament,
                                diags, {}, out.scan.layers);
     if (diags.hasErrors()) {
@@ -593,11 +695,15 @@ int runServe(unsigned short port, const std::filesystem::path& exeDir,
                 NullProgressSink progress;
                 RewriteStats stats;
                 {
+                    RewriteOptions options;
+                    options.minFlow = run.settings.minFlow;
+                    options.maxFlow = run.settings.maxFlow;
+
                     std::ifstream in{r.field("path"), std::ios::binary};
                     std::ofstream outFile{staged, std::ios::binary};
                     stats = rewriteGcode(in, outFile, run.scan, run.analysis, run.plan,
                                          run.settings.extruder, run.settings.filament,
-                                         diags, progress, {});
+                                         diags, progress, options);
                 }
                 if (diags.hasErrors()) {
                     std::filesystem::remove_all(scratch, ec);

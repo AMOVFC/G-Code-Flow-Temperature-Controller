@@ -238,7 +238,16 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
             const double area = extrusionArea(layerHeight, lineWidth);
 
             if (planned.has_value() && area > 0.0) {
-                const double budget = temperatureToFlow(filament, *planned);
+                double budget = temperatureToFlow(filament, *planned);
+
+                // User-imposed bounds, applied on top of the calibration curve.
+                if (options.maxFlow > 0.0) {
+                    budget = std::min(budget, options.maxFlow);
+                }
+                if (options.minFlow > 0.0) {
+                    budget = std::max(budget, options.minFlow);
+                }
+
                 const double recommended = flowToFeedrate(budget, area);
 
                 // THE core safety property (ALGORITHM.md §2): speed is clamped downward

@@ -70,6 +70,41 @@ std::string_view normaliseLine(std::string_view line, bool isFirstLine)
     return line;
 }
 
+double parseDuration(std::string_view text)
+{
+    // Accepts the slicer's "1d 2h 3m 4s" form, any subset, in any order.
+    double total = 0.0;
+    double number = 0.0;
+    bool haveNumber = false;
+
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c >= '0' && c <= '9') {
+            const auto* begin = text.data() + i;
+            const auto* end = text.data() + text.size();
+            double v = 0.0;
+            const auto [ptr, ec] = std::from_chars(begin, end, v);
+            if (ec == std::errc{}) {
+                number = v;
+                haveNumber = true;
+                i += static_cast<std::size_t>(ptr - begin) - 1;
+            }
+            continue;
+        }
+        if (!haveNumber) {
+            continue;
+        }
+        switch (c) {
+        case 'd': total += number * 86400.0; haveNumber = false; break;
+        case 'h': total += number * 3600.0;  haveNumber = false; break;
+        case 'm': total += number * 60.0;    haveNumber = false; break;
+        case 's': total += number;           haveNumber = false; break;
+        default: break;
+        }
+    }
+    return total;
+}
+
 std::optional<std::string_view> commentValue(std::string_view line, std::string_view key)
 {
     if (line.empty() || line.front() != ';') {
@@ -195,6 +230,15 @@ ScanResult GcodeScanner::scan(std::istream& in, DiagnosticList& diagnostics)
         if (result.filamentType.empty()) {
             if (const auto v = detail::commentValue(line, "filament_type")) {
                 result.filamentType = std::string(*v);
+            }
+        }
+
+        // The slicer's own estimate, e.g. "; estimated printing time (normal mode) = 7m 18s".
+        // Used only as a cross-check on our timing -- see ScanResult::slicerEstimatedTime.
+        if (result.slicerEstimatedTime <= 0.0 &&
+            startsWith(line, "; estimated printing time")) {
+            if (const auto eq = line.find('='); eq != std::string_view::npos) {
+                result.slicerEstimatedTime = detail::parseDuration(line.substr(eq + 1));
             }
         }
     }

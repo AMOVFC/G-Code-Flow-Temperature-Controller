@@ -65,4 +65,17 @@ struct FlowAnalysisOptions {
 // Cross-sectional area of the filament itself, mm^2.
 [[nodiscard]] double filamentCrossSection(Millimetres diameter) noexcept;
 
+// Compares our computed print time against the slicer's own estimate and warns when they
+// disagree sharply.
+//
+// This is the single highest-value sanity check in the tool. A printer config describing
+// the wrong machine produces a completely self-consistent result -- flow, temperature and
+// speed are all computed correctly from timings that are simply wrong -- so nothing else
+// looks amiss. The slicer's estimate is the only independent second opinion available.
+//
+// Observed in practice: a config claiming 6000 mm/s^2 on a machine capable of 150000
+// reported 13m 50s where the slicer said 7m 18s, and halved every flow figure with it.
+void checkTimingAgainstSlicer(const ScanResult& scan, const SourceAnalysis& analysis,
+                              DiagnosticList& diagnostics);
+
 } // namespace sb53

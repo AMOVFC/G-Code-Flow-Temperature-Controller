@@ -49,6 +49,7 @@ std::string_view toString(Code c) noexcept
     case Code::TemperaturePointsNotMonotonic:return "temperature-points-not-monotonic";
     case Code::PrinterConfigMissing:         return "printer-config-missing";
     case Code::PrinterConfigInvalid:         return "printer-config-invalid";
+    case Code::PrinterConfigMismatch:        return "printer-config-mismatch";
 
     case Code::EstimatorNotFound:            return "estimator-not-found";
     case Code::EstimatorFailed:              return "estimator-failed";

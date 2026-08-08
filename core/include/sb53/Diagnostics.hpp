@@ -72,6 +72,12 @@ enum class Code {
     PrinterConfigMissing,
     PrinterConfigInvalid,
 
+    // Our computed print time disagrees sharply with the slicer's own estimate, which
+    // means the loaded config.json almost certainly describes a different machine.
+    // Reported loudly because the result still LOOKS fine: flow, temperature and speed
+    // are all computed consistently from wrong timings.
+    PrinterConfigMismatch,
+
     // --- estimator -----------------------------------------------------------
     EstimatorNotFound,
     EstimatorFailed,
