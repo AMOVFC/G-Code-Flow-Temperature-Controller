@@ -198,11 +198,16 @@ margin-right:5px}
         <label><span>max accel mm/s&sup2;</span><input name="maxAccel" placeholder="from config" inputmode="decimal"></label>
       </div>
       <label><span>square corner velocity mm/s</span><input name="scv" placeholder="from config" inputmode="decimal"></label>
+      <div class="row2">
+        <label><span>Z velocity mm/s</span><input name="zVel" placeholder="from config" inputmode="decimal"></label>
+        <label><span>Z accel mm/s&sup2;</span><input name="zAccel" placeholder="from config" inputmode="decimal"></label>
+      </div>
       <p class="hint">These must match your printer.cfg. If they are wrong, the print time
       and every flow figure derived from it are wrong &mdash; and nothing looks amiss.
-      <br><b>Note:</b> the Z and extruder limits inside <code>move_checkers</code> still
-      come from config.json and are not overridden here, so a config for the wrong
-      machine is only partly corrected. Fix the file for a real setup.</p>
+      <br><b>Z is worth attention:</b> it is the one limit measured to change print time
+      on a small model &mdash; 192 layers means 192 Z moves. Raising it from 50 to
+      200&nbsp;mm/s cut a benchy from 7m&nbsp;58s to 7m&nbsp;15s.
+      <br>The extruder limiter still comes from config.json.</p>
     </fieldset>
 
     <fieldset>
@@ -420,13 +425,16 @@ struct FormSettings {
     double maxVelocity = 0.0;
     double maxAcceleration = 0.0;
     double squareCornerVelocity = 0.0;
+    double zVelocity = 0.0;
+    double zAcceleration = 0.0;
 
     CubicMmPerSec minFlow = 0.0;
     CubicMmPerSec maxFlow = 0.0;
 
     [[nodiscard]] bool overridesPrinterLimits() const noexcept
     {
-        return maxVelocity > 0.0 || maxAcceleration > 0.0 || squareCornerVelocity > 0.0;
+        return maxVelocity > 0.0 || maxAcceleration > 0.0 || squareCornerVelocity > 0.0
+            || zVelocity > 0.0 || zAcceleration > 0.0;
     }
 };
 
@@ -463,6 +471,58 @@ std::string overrideConfigValue(std::string json, std::string_view key, double v
     return json;
 }
 
+// Same substitution, but scoped inside a named object within move_checkers.
+//
+// Needed for the Z axis limiter, whose keys are called max_velocity and max_accel just
+// like the top-level ones. Measured on a real benchy: raising Z from 50 to 200 mm/s took
+// 7m 58s to 7m 15s -- the only machine limit that changed the time at all, because 192
+// layers means 192 Z moves.
+std::string overrideNestedValue(std::string json, std::string_view section,
+                                std::string_view key, double value)
+{
+    if (!(value > 0.0)) {
+        return json;
+    }
+    const auto sectionAt = json.find("\"" + std::string(section) + "\"");
+    if (sectionAt == std::string::npos) {
+        return json;
+    }
+
+    // Bound the search to this object so a later checker is not hit by mistake.
+    const auto open = json.find('{', sectionAt);
+    if (open == std::string::npos) {
+        return json;
+    }
+    int depth = 0;
+    std::size_t close = std::string::npos;
+    for (std::size_t i = open; i < json.size(); ++i) {
+        if (json[i] == '{') { ++depth; }
+        else if (json[i] == '}') { if (--depth == 0) { close = i; break; } }
+    }
+    if (close == std::string::npos) {
+        return json;
+    }
+
+    const auto at = json.find("\"" + std::string(key) + "\"", open);
+    if (at == std::string::npos || at > close) {
+        return json;
+    }
+    const auto colon = json.find(':', at);
+    if (colon == std::string::npos || colon > close) {
+        return json;
+    }
+    const auto valueStart = json.find_first_not_of(" \t", colon + 1);
+    const auto valueEnd = json.find_first_of(",}\r\n", valueStart);
+    if (valueStart == std::string::npos || valueEnd == std::string::npos) {
+        return json;
+    }
+
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.6g", value);
+    json.replace(valueStart, valueEnd - valueStart, buf);
+    return json;
+}
+
 FormSettings readSettings(const Request& r)
 {
     FormSettings s;
@@ -485,6 +545,8 @@ FormSettings readSettings(const Request& r)
     s.maxVelocity = r.number("maxVel", 0.0);
     s.maxAcceleration = r.number("maxAccel", 0.0);
     s.squareCornerVelocity = r.number("scv", 0.0);
+    s.zVelocity = r.number("zVel", 0.0);
+    s.zAcceleration = r.number("zAccel", 0.0);
     s.minFlow = r.number("minFlow", 0.0);
     s.maxFlow = r.number("maxFlow", 0.0);
 
@@ -584,6 +646,10 @@ RunResult runToPlan(const Request& request, const std::filesystem::path& exeDir,
                                    out.settings.maxAcceleration);
         json = overrideConfigValue(std::move(json), "square_corner_velocity",
                                    out.settings.squareCornerVelocity);
+        json = overrideNestedValue(std::move(json), "axis_limiter", "max_velocity",
+                                   out.settings.zVelocity);
+        json = overrideNestedValue(std::move(json), "axis_limiter", "max_accel",
+                                   out.settings.zAcceleration);
 
         const auto amended = scratch / "config.json";
         std::ofstream dst{amended, std::ios::binary};
