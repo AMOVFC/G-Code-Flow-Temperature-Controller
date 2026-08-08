@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -201,6 +202,118 @@ std::string jsonNumber(double value)
     return out.empty() ? "0" : out;
 }
 
+namespace {
+
+// Serves one connection to completion, then closes it.
+//
+// Runs on its own thread. Two reasons, both of which broke the browser before threading
+// existed:
+//
+// 1. Browsers open SPECULATIVE connections and frequently send nothing on them. A
+//    single-threaded server accepts one, blocks in recv() waiting for a request that
+//    never arrives, and never accepts the real one. The page reports
+//    "TypeError: Failed to fetch" because the request genuinely never reached us.
+// 2. Processing a large G-code file takes ten seconds or more, and everything else the
+//    page asks for would queue behind it.
+void handleConnection(socket_t client, const Handler& handler)
+{
+    // Drop a connection that goes quiet instead of blocking on it forever. This is what
+    // reaps those speculative connections.
+#ifdef _WIN32
+    DWORD timeout = 15000;                       // milliseconds
+#else
+    timeval timeout{15, 0};
+#endif
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+    std::string raw;
+    char buffer[8192];
+    std::size_t headerEnd = std::string::npos;
+
+    while (headerEnd == std::string::npos) {
+        const auto n = ::recv(client, buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            break;                               // closed, or the read timed out
+        }
+        raw.append(buffer, static_cast<std::size_t>(n));
+        headerEnd = raw.find("\r\n\r\n");
+        if (raw.size() > kMaxBody) {
+            break;
+        }
+    }
+
+    if (headerEnd == std::string::npos) {
+        closesocket(client);
+        return;
+    }
+
+    Request request;
+    {
+        const auto lineEnd = raw.find("\r\n");
+        const std::string requestLine = raw.substr(0, lineEnd);
+        const auto sp1 = requestLine.find(' ');
+        const auto sp2 = requestLine.find(' ', sp1 + 1);
+        if (sp1 != std::string::npos && sp2 != std::string::npos) {
+            request.method = requestLine.substr(0, sp1);
+            request.path = requestLine.substr(sp1 + 1, sp2 - sp1 - 1);
+        }
+    }
+
+    std::size_t contentLength = 0;
+    {
+        const std::string headers = raw.substr(0, headerEnd);
+        auto pos = headers.find("Content-Length:");
+        if (pos == std::string::npos) {
+            pos = headers.find("content-length:");
+        }
+        if (pos != std::string::npos) {
+            const auto valueStart = headers.find_first_not_of(" ", pos + 15);
+            contentLength = static_cast<std::size_t>(
+                std::strtoul(headers.c_str() + valueStart, nullptr, 10));
+            contentLength = std::min(contentLength, kMaxBody);
+        }
+    }
+
+    std::string body = raw.substr(headerEnd + 4);
+    while (body.size() < contentLength) {
+        const auto n = ::recv(client, buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            break;
+        }
+        body.append(buffer, static_cast<std::size_t>(n));
+    }
+    request.body = body.substr(0, std::min(contentLength, body.size()));
+    parseFields(request.body, request.fields);
+
+    if (const auto q = request.path.find('?'); q != std::string::npos) {
+        parseFields(std::string_view(request.path).substr(q + 1), request.fields);
+        request.path = request.path.substr(0, q);
+    }
+
+    Response response;
+    try {
+        response = handler(request);
+    } catch (const std::exception& e) {
+        response = Response::error(500, e.what());
+    } catch (...) {
+        response = Response::error(500, "unknown error");
+    }
+
+    std::string out = "HTTP/1.1 " + std::to_string(response.status) + " " +
+                      statusText(response.status) + "\r\n";
+    out += "Content-Type: " + response.contentType + "\r\n";
+    out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
+    out += "Cache-Control: no-store\r\n";
+    out += "Connection: close\r\n\r\n";
+    out += response.body;
+
+    sendAll(client, out);
+    closesocket(client);
+}
+
+} // namespace
+
 bool serve(unsigned short port, const Handler& handler)
 {
 #ifdef _WIN32
@@ -233,7 +346,7 @@ bool serve(unsigned short port, const Handler& handler)
         closesocket(listener);
         return false;
     }
-    if (::listen(listener, 8) != 0) {
+    if (::listen(listener, 16) != 0) {
         std::fprintf(stderr, "error: listen failed\n");
         closesocket(listener);
         return false;
@@ -244,93 +357,7 @@ bool serve(unsigned short port, const Handler& handler)
         if (client == kInvalidSocket) {
             continue;
         }
-
-        std::string raw;
-        char buffer[8192];
-        std::size_t headerEnd = std::string::npos;
-
-        // Read until the headers are complete.
-        while (headerEnd == std::string::npos) {
-            const auto n = ::recv(client, buffer, sizeof(buffer), 0);
-            if (n <= 0) {
-                break;
-            }
-            raw.append(buffer, static_cast<std::size_t>(n));
-            headerEnd = raw.find("\r\n\r\n");
-            if (raw.size() > kMaxBody) {
-                break;
-            }
-        }
-
-        if (headerEnd == std::string::npos) {
-            closesocket(client);
-            continue;
-        }
-
-        Request request;
-        {
-            const auto lineEnd = raw.find("\r\n");
-            const std::string requestLine = raw.substr(0, lineEnd);
-            const auto sp1 = requestLine.find(' ');
-            const auto sp2 = requestLine.find(' ', sp1 + 1);
-            if (sp1 != std::string::npos && sp2 != std::string::npos) {
-                request.method = requestLine.substr(0, sp1);
-                request.path = requestLine.substr(sp1 + 1, sp2 - sp1 - 1);
-            }
-        }
-
-        // Read the body, if the headers declared one.
-        std::size_t contentLength = 0;
-        {
-            const std::string headers = raw.substr(0, headerEnd);
-            auto pos = headers.find("Content-Length:");
-            if (pos == std::string::npos) {
-                pos = headers.find("content-length:");
-            }
-            if (pos != std::string::npos) {
-                const auto valueStart = headers.find_first_not_of(" ", pos + 15);
-                contentLength = static_cast<std::size_t>(
-                    std::strtoul(headers.c_str() + valueStart, nullptr, 10));
-                contentLength = std::min(contentLength, kMaxBody);
-            }
-        }
-
-        std::string body = raw.substr(headerEnd + 4);
-        while (body.size() < contentLength) {
-            const auto n = ::recv(client, buffer, sizeof(buffer), 0);
-            if (n <= 0) {
-                break;
-            }
-            body.append(buffer, static_cast<std::size_t>(n));
-        }
-        request.body = body.substr(0, contentLength);
-        parseFields(request.body, request.fields);
-
-        // Query string fields, so GET can carry parameters too.
-        if (const auto q = request.path.find('?'); q != std::string::npos) {
-            parseFields(std::string_view(request.path).substr(q + 1), request.fields);
-            request.path = request.path.substr(0, q);
-        }
-
-        Response response;
-        try {
-            response = handler(request);
-        } catch (const std::exception& e) {
-            response = Response::error(500, e.what());
-        } catch (...) {
-            response = Response::error(500, "unknown error");
-        }
-
-        std::string out = "HTTP/1.1 " + std::to_string(response.status) + " " +
-                          statusText(response.status) + "\r\n";
-        out += "Content-Type: " + response.contentType + "\r\n";
-        out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
-        out += "Cache-Control: no-store\r\n";
-        out += "Connection: close\r\n\r\n";
-        out += response.body;
-
-        sendAll(client, out);
-        closesocket(client);
+        std::thread(handleConnection, client, std::cref(handler)).detach();
     }
 }
 

@@ -22,8 +22,56 @@
 #include <fstream>
 #include <sstream>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <commdlg.h>
+#pragma comment(lib, "Comdlg32.lib")
+#endif
+
 namespace sb53::web {
 namespace {
+
+// Opens a native file dialog and returns the chosen path.
+//
+// A browser deliberately cannot hand a server a local file path -- that would be a
+// serious information leak on the open web. But this server IS the user's machine, so it
+// can ask the operating system directly. The page calls /api/browse and gets a real path
+// back, which beats copying and pasting one.
+std::string chooseGcodeFile()
+{
+#ifdef _WIN32
+    wchar_t path[MAX_PATH * 4]{};
+
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = L"G-code files\0*.gcode;*.gco;*.g\0All files\0*.*\0\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(path));
+    ofn.lpstrTitle = L"Select a G-code file";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+    if (!::GetOpenFileNameW(&ofn)) {
+        return {};   // cancelled
+    }
+
+    const int size = ::WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0,
+                                           nullptr, nullptr);
+    if (size <= 1) {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(size - 1), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, path, -1, result.data(), size, nullptr, nullptr);
+    return result;
+#else
+    return {};
+#endif
+}
 
 // Distinct scratch-directory names. Uses a counter as well as the clock, because two
 // requests can land inside the same clock tick.
@@ -87,6 +135,9 @@ margin-bottom:8px}
 .key{display:inline-block;width:22px;height:0;border-top-width:3px;vertical-align:middle;
 margin-right:5px}
 .hint{font-size:12px;color:var(--muted);margin:-4px 0 10px}
+.pick{display:flex;gap:6px}
+.pick input{flex:1;min-width:0}
+.pick button{white-space:nowrap;padding:7px 12px;font-weight:500}
 .empty{color:var(--muted);text-align:center;padding:60px 20px}
 </style>
 </head>
@@ -101,8 +152,11 @@ margin-right:5px}
   <form class="panel" id="form">
     <fieldset>
       <legend>Input</legend>
-      <label><span>G-code file (full path)</span>
-        <input name="path" id="path" placeholder="C:\path\to\print.gcode" required></label>
+      <label><span>G-code file</span>
+        <div class="pick">
+          <input name="path" id="path" placeholder="choose a file, or paste a path" required>
+          <button type="button" id="browse" class="secondary">Browse&hellip;</button>
+        </div></label>
       <label><span>klipper_estimator.exe (blank = auto)</span>
         <input name="estimator" id="estimator" placeholder="auto-detected"></label>
     </fieldset>
@@ -202,6 +256,18 @@ async function call(endpoint, btn){
   }catch(e){ msg('err', 'Request failed: '+e); return null; }
   finally{ btn.disabled=false; btn.textContent=old; }
 }
+
+$('#browse').addEventListener('click', async ()=>{
+  const btn = $('#browse');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = 'Choosing...';
+  try{
+    // The dialog opens on the machine running the server, which is this machine.
+    const r = await fetch('/api/browse', {method:'POST'});
+    const j = await r.json();
+    if(j.path){ $('#path').value = j.path; clearMsg(); }
+  }catch(e){ msg('err','Could not open the file dialog: '+e); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+});
 
 $('#form').addEventListener('submit', async e=>{
   e.preventDefault();
@@ -494,6 +560,14 @@ int runServe(unsigned short port, const std::filesystem::path& exeDir,
 
         if (r.path == "/api/version") {
             return Response::json("{\"version\":\"" + std::string(kVersion) + "\"}");
+        }
+
+        if (r.path == "/api/browse") {
+            const std::string chosen = chooseGcodeFile();
+            if (chosen.empty()) {
+                return Response::json("{\"cancelled\":true}");
+            }
+            return Response::json("{\"path\":\"" + jsonEscape(chosen) + "\"}");
         }
 
         if (r.path == "/api/analyze" || r.path == "/api/process") {
