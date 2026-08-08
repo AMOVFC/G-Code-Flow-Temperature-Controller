@@ -27,7 +27,41 @@
 #include <string_view>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// Order matters: shellapi.h depends on types from windows.h and will not compile first.
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 namespace {
+
+// True when this process created its own console, i.e. it was started from Explorer
+// rather than from an existing shell. A shell-launched process shares the shell's
+// console, so more than one process is attached to it.
+bool launchedByDoubleClick()
+{
+#ifdef _WIN32
+    DWORD pids[4]{};
+    return ::GetConsoleProcessList(pids, 4) == 1;
+#else
+    return false;
+#endif
+}
+
+void openBrowser(const char* url)
+{
+#ifdef _WIN32
+    ::ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    (void)url;
+#endif
+}
 
 int printUsage()
 {
@@ -695,6 +729,19 @@ int runProcess(std::string_view inputPath, std::string outputPath,
 int main(int argc, char** argv)
 {
     const std::vector<std::string_view> args(argv + 1, argv + argc);
+
+    // Double-clicked from Explorer: launch the web UI and open a browser.
+    //
+    // Without this the program prints its usage and exits, the console window it created
+    // closes with it, and it looks like nothing happened at all. Someone who double-clicks
+    // an application wants the application, not a usage message they cannot read.
+    if (args.empty() && launchedByDoubleClick()) {
+        std::error_code ec;
+        const auto exeDir =
+            std::filesystem::absolute(std::filesystem::path(argv[0]), ec).parent_path();
+        openBrowser("http://127.0.0.1:8765");
+        return sb53::web::runServe(8765, exeDir, findEstimator);
+    }
 
     if (args.empty() || args[0] == "--help" || args[0] == "-h") {
         return printUsage();
