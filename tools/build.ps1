@@ -7,7 +7,7 @@
     separate CMake install and no "Developer Prompt" is required.
 
     This script exists because none of cmake, ninja or cl are on PATH in a normal shell
-    on a machine with only Visual Studio installed — a detail that otherwise costs
+    on a machine with only Visual Studio installed -- a detail that otherwise costs
     fifteen minutes to rediscover after a long gap.
 
 .EXAMPLE

@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 $lines = [System.IO.File]::ReadAllLines($InputFile)
 
 # The print body starts at the first layer-height marker and ends at the executable
-# block end. See ALGORITHM.md §9.
+# block end. See ALGORITHM.md ?9.
 $bodyStart = -1
 $bodyEnd = -1
 for ($i = 0; $i -lt $lines.Count; $i++) {

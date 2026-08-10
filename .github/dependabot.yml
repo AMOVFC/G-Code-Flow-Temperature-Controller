@@ -1,0 +1,24 @@
+version: 2
+
+updates:
+  # GitHub Actions are the supply chain most often forgotten. A compromised or abandoned
+  # action runs with access to the build.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels: [dependencies, security]
+
+# Note: C++ dependencies here are not managed by any ecosystem Dependabot understands.
+#
+#   - Catch2 is pinned by git tag in tests/CMakeLists.txt (test-only, not shipped).
+#   - klipper_estimator.exe is a vendored binary and a FORK of upstream, so it will never
+#     appear in a manifest. Its hash is recorded in the SBOM job in security.yml, and it
+#     is deliberately NOT auto-updated -- ADR-0007 requires it stay pinned while the
+#     in-process planner is validated against it.
+#
+# Anything added later that Dependabot can see should be listed above.

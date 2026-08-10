@@ -1,0 +1,149 @@
+name: Security
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly-disclosed vulnerability in a pinned dependency surfaces even
+    # when nobody is committing. This project is worked on intermittently by design.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-extended,security-and-quality
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSB53_BUILD_CLI=OFF
+          cmake --build build
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:c-cpp
+
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks needs history to scan past commits
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  licences:
+    name: licence compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This is not box-ticking. The project is MIT and has already had to avoid two
+      # real GPL traps: Qt Charts / QCustomPlot for the chart (ADR-0004) and Klipper's
+      # own source for the motion planner (ADR-0007). Linking or transliterating either
+      # would silently relicense the whole project, and nobody would notice at review.
+      - name: no GPL-licensed dependencies
+        run: pwsh -File tools/check-licences.ps1
+
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          artifact-name: sbom.cyclonedx.json
+          output-file: sbom.cyclonedx.json
+
+      # A vendored binary dependency that nobody can enumerate is a supply-chain blind
+      # spot. klipper_estimator.exe in particular is a FORK, not upstream, so it will
+      # never appear in a package manifest.
+      - name: Record vendored binaries
+        run: |
+          {
+            echo "## Vendored binaries (not in any package manifest)"
+            echo
+            echo "| file | sha256 |"
+            echo "|---|---|"
+            for f in bin/*.exe; do
+              [ -e "$f" ] || continue
+              echo "| \`$f\` | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json
+
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: fuzz the parsers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      # The scanner and move-dump parser both consume untrusted input: a G-code file
+      # comes from a slicer, but also from the internet, and the estimator's output is
+      # a subprocess boundary. A short run on every push catches the crashes; longer
+      # campaigns belong in the scheduled build.
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSB53_BUILD_CLI=OFF
+          -DSB53_BUILD_TESTS=OFF
+          -DSB53_FUZZ=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run
+        run: |
+          mkdir -p corpus
+          cp testdata/fixtures/*.gcode corpus/ 2>/dev/null || true
+          ./build/bin/fuzz_scanner corpus \
+            -max_total_time=${{ github.event_name == 'schedule' && 300 || 60 }} \
+            -print_final_stats=1
+
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*

@@ -8,7 +8,7 @@
     files you can print back to back.
 
     Everything happens on COPIES. The legacy tool overwrites the file it is given and,
-    if you close its window, deletes it — so the original is never handed to it directly.
+    if you close its window, deletes it -- so the original is never handed to it directly.
 
 .PARAMETER Input
     The raw, unprocessed G-code to test with.

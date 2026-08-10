@@ -11,7 +11,10 @@ project(sb53
 # ---------------------------------------------------------------------------
 option(SB53_BUILD_TESTS "Build the test suite"        ON)
 option(SB53_BUILD_CLI   "Build the command-line tool" ON)
-option(SB53_BUILD_QT    "Build the Qt 6 GUI"          OFF)  # enabled at milestone M8
+option(SB53_BUILD_QT    "Build the Qt 6 GUI"          OFF)  # superseded by the web UI
+option(SB53_SANITIZE    "Address + UB sanitizers"     OFF)
+option(SB53_COVERAGE    "Instrument for coverage"     OFF)
+option(SB53_FUZZ        "Build libFuzzer targets"     OFF)
 
 # ---------------------------------------------------------------------------
 # Global settings
@@ -51,6 +54,36 @@ endif()
 include(cmake/SB53Warnings.cmake)
 
 # ---------------------------------------------------------------------------
+# Sanitizers, coverage, fuzzing
+# ---------------------------------------------------------------------------
+# All three are CI-only build modes. They change codegen substantially and must never be
+# on for a binary anyone prints with.
+if(SB53_SANITIZE)
+    if(MSVC)
+        add_compile_options(/fsanitize=address)
+    else()
+        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=address,undefined)
+    endif()
+endif()
+
+if(SB53_COVERAGE AND NOT MSVC)
+    add_compile_options(--coverage -O0 -g)
+    add_link_options(--coverage)
+endif()
+
+if(SB53_FUZZ)
+    # libFuzzer is clang-only. The parsers it targets consume untrusted input: G-code
+    # arrives from a slicer but also from the internet, and the estimator's output
+    # crosses a subprocess boundary.
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "SB53_FUZZ requires clang")
+    endif()
+    add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+# ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
 add_subdirectory(core)
@@ -66,6 +99,12 @@ endif()
 if(SB53_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(SB53_FUZZ)
+    add_executable(fuzz_scanner tests/fuzz/fuzz_scanner.cpp)
+    target_link_libraries(fuzz_scanner PRIVATE sb53::core)
+    target_link_options(fuzz_scanner PRIVATE -fsanitize=fuzzer)
 endif()
 
 # ---------------------------------------------------------------------------
