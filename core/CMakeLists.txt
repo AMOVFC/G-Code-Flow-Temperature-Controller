@@ -13,6 +13,7 @@ add_library(sb53_core STATIC
     src/GcodeText.cpp
     src/Kinematics.cpp
     src/Model.cpp
+    src/ProfileStore.cpp
     src/TemperaturePlanner.cpp
     src/platform/SubprocessRunner.cpp
 )
