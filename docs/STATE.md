@@ -37,6 +37,9 @@ A clean-room C++ rewrite of the SB53 G-Code Flow/Temperature Controller, origina
 Delphi/VCL Windows application. The tool post-processes 3D-printer G-code, adjusting
 nozzle temperature to track volumetric flow rate.
 
+- **Resuming after a break, or an AI picking this up:** [AI-CONTEXT.md](AI-CONTEXT.md) —
+  the hard-won detail that fits nowhere else: stale-artefact traps, build gotchas, testing
+  pitfalls, measurements already taken, and the user's real printer values. Read it first.
 - **What it does:** [ALGORITHM.md](ALGORITHM.md) — read this before touching any code.
 - **How it is put together:** [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Why it is put together that way:** [adr/](adr/) — one file per decision.
@@ -369,8 +372,18 @@ and every flow and temperature number downstream depends on these timings.
 Nothing implemented yet. `tools/dump-profiles.py` reads the schema today; the C++
 `SqliteProfileRepository` is still to be written, and **must invert the bias on import**.
 
-### Next concrete action
-Two pieces, in this order:
+### Next concrete action: profile management (requested 2026-08-09)
+
+The user wants to **save printers, and save filament profiles within a printer that
+inherit most settings and override one or two**. Nothing exists — all calibration is typed
+in on every run, which is the main remaining friction in the workflow.
+
+Design and rationale are in [AI-CONTEXT.md §7](AI-CONTEXT.md). In short: mirror the
+existing `EXTRUDER` → `FILAMENT` shape, store as JSON under `%LOCALAPPDATA%\flowtemp\`,
+put the logic in **core** behind `IProfileRepository` (not the web layer), and treat
+"duplicate this profile" as the core of the inheritance feature.
+
+### Then, in this order:
 
 1. **`SqliteProfileRepository`** — vendor the SQLite amalgamation and read the existing
    `Config.sdb` schema unchanged ([ADR-0003](adr/0003-sqlite-in-core.md)). This removes
