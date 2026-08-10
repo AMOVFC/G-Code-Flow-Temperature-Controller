@@ -292,11 +292,14 @@ RewriteStats rewriteGcode(std::istream& in, std::ostream& out,
                     source[end] == '.' || source[end] == '-')) {
                 ++end;
             }
-            std::string out;
-            out.append(source.substr(0, at + 1));
-            out.append(value);
-            out.append(source.substr(end));
-            return out;
+            // Deliberately not named `out`: that is the output stream parameter of the
+            // enclosing function, and shadowing it here compiled fine on MSVC while GCC
+            // rejected it.
+            std::string rewritten;
+            rewritten.append(source.substr(0, at + 1));
+            rewritten.append(value);
+            rewritten.append(source.substr(end));
+            return rewritten;
         };
 
         // --- an extruding move ----------------------------------------------

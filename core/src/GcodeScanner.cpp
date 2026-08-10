@@ -29,15 +29,9 @@ constexpr std::string_view kLegacyMarker = "; Edited by";
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
-[[nodiscard]] std::string_view trim(std::string_view s) noexcept
-{
-    const auto first = s.find_first_not_of(" \t");
-    if (first == std::string_view::npos) {
-        return {};
-    }
-    const auto last = s.find_last_not_of(" \t");
-    return s.substr(first, last - first + 1);
-}
+// Note: there is no local `trim` here. It moved to GcodeText.hpp when the scanner and
+// rewriter were made to share their parsing, and the leftover copy in this file was
+// unused -- caught by GCC's -Wunused-function, which MSVC does not report.
 
 // True when `line` is a bare G-code command, i.e. the token appears at the start and is
 // followed by end-of-line, whitespace, or a comment. Prevents `M83` from matching
