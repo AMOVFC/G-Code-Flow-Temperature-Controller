@@ -100,22 +100,31 @@ void readStr(std::string_view s, std::string_view key, std::string& out,
     const auto at = keyAt(s, key, from, to);
     if (at == std::string_view::npos || s[at] != '"') { return; }
     std::string value;
-    for (std::size_t i = at + 1; i < s.size() && s[i] != '"'; ++i) {
+
+    // A while loop, not a for loop: the escape-sequence branch below needs to advance by
+    // 2 characters (the backslash and the character it escapes) while the plain branch
+    // advances by 1, and a for-loop's fixed `++i` header cannot express that. An earlier
+    // version used a for-loop with `++i` in the body to reach the escaped character before
+    // reading it, which CodeQL's cpp/loop-variable-changed correctly flagged as hard to
+    // follow -- not because it was wrong (it was traced correct and is covered by
+    // test_profilestore.cpp), but because a reader has to notice the body mutates the same
+    // variable the header increments. Reading `s[i + 1]` directly, without mutating `i`
+    // first, is also clearer on its own: the escaped character is looked at before any
+    // index changes, rather than after.
+    std::size_t i = at + 1;
+    while (i < s.size() && s[i] != '"') {
         if (s[i] == '\\' && i + 1 < s.size()) {
-            // Deliberately advances past the backslash onto the escaped character so the
-            // switch below reads it, not the backslash itself; the outer for-loop's own
-            // ++i then moves past that character to whatever follows. Flagged by CodeQL
-            // (cpp/loop-variable-changed) as worth a second look; traced correct and
-            // covered by an escape-sequence round-trip test in test_profilestore.cpp.
-            ++i;
-            switch (s[i]) {
+            const char escaped = s[i + 1];
+            switch (escaped) {
             case 'n': value += '\n'; break;
             case 't': value += '\t'; break;
             case 'r': value += '\r'; break;
-            default:  value += s[i];
+            default:  value += escaped;
             }
+            i += 2;   // the backslash and the character it escaped
         } else {
             value += s[i];
+            ++i;
         }
     }
     out = value;

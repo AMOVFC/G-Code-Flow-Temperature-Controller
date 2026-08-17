@@ -71,7 +71,15 @@ double parseDuration(std::string_view text)
     double number = 0.0;
     bool haveNumber = false;
 
-    for (std::size_t i = 0; i < text.size(); ++i) {
+    // A while loop, not a for loop: each iteration advances `i` by a variable amount (the
+    // width of whatever from_chars just consumed), which a for-loop's fixed `++i` header
+    // does not express cleanly. An earlier version used a for-loop with `i +=
+    // (consumed - 1)` in the body to compensate for that header increment, which CodeQL's
+    // cpp/loop-variable-changed correctly flagged as hard to follow -- not because it was
+    // wrong (it was traced correct and is covered by test_scanner.cpp), but because nothing
+    // about a for-loop's header suggests its own increment is only part of the step size.
+    std::size_t i = 0;
+    while (i < text.size()) {
         const char c = text[i];
         if (c >= '0' && c <= '9') {
             const auto* begin = text.data() + i;
@@ -81,26 +89,22 @@ double parseDuration(std::string_view text)
             if (ec == std::errc{}) {
                 number = v;
                 haveNumber = true;
-                // Deliberately advances the loop index past the digits from_chars just
-                // consumed, so the outer for-loop's own ++i lands on the character right
-                // after the number (its unit letter) rather than re-scanning digits one
-                // at a time. `-1` compensates for that same ++i. Flagged by CodeQL
-                // (cpp/loop-variable-changed) as worth a second look; traced correct and
-                // covered by a multi-digit test in test_scanner.cpp.
-                i += static_cast<std::size_t>(ptr - begin) - 1;
+                i += static_cast<std::size_t>(ptr - begin);   // past every digit consumed
+            } else {
+                ++i;   // malformed number; do not spin on the same character forever
             }
             continue;
         }
-        if (!haveNumber) {
-            continue;
+        if (haveNumber) {
+            switch (c) {
+            case 'd': total += number * 86400.0; haveNumber = false; break;
+            case 'h': total += number * 3600.0;  haveNumber = false; break;
+            case 'm': total += number * 60.0;    haveNumber = false; break;
+            case 's': total += number;           haveNumber = false; break;
+            default: break;
+            }
         }
-        switch (c) {
-        case 'd': total += number * 86400.0; haveNumber = false; break;
-        case 'h': total += number * 3600.0;  haveNumber = false; break;
-        case 'm': total += number * 60.0;    haveNumber = false; break;
-        case 's': total += number;           haveNumber = false; break;
-        default: break;
-        }
+        ++i;
     }
     return total;
 }
