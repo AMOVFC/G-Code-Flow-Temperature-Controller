@@ -42,6 +42,32 @@ suspecting the logic.
   That is deliberate — this code mixes doubles and integer indices constantly.
 - `tools/build.ps1` tees to `build/build.log` and prints matching error lines, because
   PowerShell's native-command handling silently ate compiler output more than once.
+- **MSVC is meaningfully more permissive than GCC/Clang about the things that matter
+  here**, and CI's first Linux run found several real defects at once (all fixed by
+  2026-08-10, see `STATE.md` "M8c" for the full table): a local variable shadowing an
+  outer parameter of the same name, a dead function `-Wunused-function` catches and MSVC
+  doesn't, and — the one worth internalising — **`std::isfinite`/`std::abs(double)` used
+  without `#include <cmath>`**, relying on MSVC's header graph pulling it in
+  transitively. The `std::abs` case was not merely a build failure risk: if only
+  `<cstdlib>`'s integer overload had been visible, a `double` argument would have
+  silently truncated via implicit conversion rather than failing to compile. **Always
+  include what you use directly; never rely on a header providing something transitively,
+  even when it happens to compile.**
+- **There is no local Linux/GCC/Clang toolchain on the Windows dev machine** — checked:
+  no WSL distro installed (`wsl.exe --list` reports none), no Docker, no native compiler.
+  Linux-only build failures can only be diagnosed by reading the CI log output precisely
+  (`gh run view --job <id> --log-failed`) and reasoning from the error text — not by
+  reproducing locally. Fix, rebuild+test on MSVC to confirm no regression there, push, and
+  treat the **next CI run** as the actual verification. Do not claim a Linux fix is
+  "verified" from this machine; say "fixed per the error text, not locally reproducible,
+  pending CI confirmation" instead.
+- **`-Wnull-dereference` produces a false positive inside libstdc++'s own `<streambuf>`**
+  on the CI image's GCC 13, triggered by ordinary `std::ofstream` use at `-O2`. Confirmed
+  by reading the error location (`/usr/include/c++/13/streambuf`, not project code) — this
+  is a known category of GCC issue where an optimizer-level diagnostic (emitted after
+  inlining) fails to attribute correctly to system headers. It is removed from
+  `cmake/SB53Warnings.cmake`'s GCC/Clang warning set with a comment, not suppressed
+  per-file or ignored silently.
 
 ## 3. Testing traps
 
@@ -108,35 +134,54 @@ Worth internalising, because the same class will recur.
 
 ## 7. Where the next work is
 
-### Immediate: profile management in the UI (requested, not started)
+### Immediate: wire the (already-built) profile store into the UI
 
-The user wants to **save printers, and save profiles within a printer that inherit most
-settings and override one or two**. Nothing exists yet — all calibration is typed in.
-
-Suggested shape, matching the existing schema so `Config.sdb` import stays possible:
+**Storage is done as of 2026-08-10** — do not redesign it, extend it. The user wants to
+**save printers, and save profiles within a printer that inherit most settings and
+override one or two**. `core/include/sb53/ProfileStore.hpp` + `.cpp` implement exactly
+this, tested (8 tests, part of the 61 total):
 
 ```
-Printer (= EXTRUDER row)   name, kinematics/config.json, rise, fall, smoothing,
-                           start macro, temperature token
-  └─ Filament (= FILAMENT row)  name, type, 3 flow points, 3 temps, 3 PA values,
-                                PA on/off, bias
+SavedPrinter    name, rise, fall, smoothing, cooling settings, start macro/token,
+                machine limits (velocity, accel, SCV, Z velocity, Z accel)
+  └─ SavedFilament  name, type, 3 flow points, 3 temps, bias, flow bounds, PA switch
 ```
 
-- Store as JSON under `%LOCALAPPDATA%\flowtemp\profiles.json` — do **not** write to the
-  legacy `.sdb`, which is irreplaceable user data (ADR-0003).
-- Inheritance is the point: a filament belongs to a printer and should only carry what
-  differs. A "duplicate this profile" action is probably the whole feature.
-- `IProfileRepository` already exists in `Profiles.hpp` as the intended seam. Put the
-  logic in **core**, not the web layer, or the future Orca plugin reimplements it
-  (ADR-0002, ADR-0003).
-- Import from `Config.sdb` should apply the bias inversion in §4 and **say so**.
+Stored as hand-rolled JSON (no library dependency) at
+`%LOCALAPPDATA%\flowtemp\profiles.json`, atomic write (temp file + rename). **Not**
+written to the legacy `.sdb` — that stays irreplaceable user data (ADR-0003), read-only
+via `tools/dump-profiles.py` for import.
+
+**What is missing is only the UI wiring**, all in `cli/WebUI.cpp`:
+1. `GET /api/profiles` — serialise `ProfileStore::load(ProfileStore::defaultPath(), ...)`
+   to the same JSON shape the store already produces (`toJson()` exists; reuse it or adapt).
+2. `POST /api/profiles/save` — read the current form fields, build a `SavedPrinter`/
+   `SavedFilament`, `store.upsert(...)`, `store.save(...)`.
+3. Two `<select>` elements (printer, then filament-within-that-printer) + a name input +
+   Save/Duplicate buttons in the page's calibration fieldset.
+4. Selecting a printer fills the machine-limit fields only; selecting a filament fills
+   only the filament fields. Do not let one clobber the other.
+5. A "Duplicate" action is copy-then-rename — that alone delivers "keep most settings,
+   change one," which is the actual feature being asked for.
+
+This is scoped small on purpose. Do not expand it into a bigger redesign; the storage
+layer was deliberately finished as a clean stopping point in the previous session for
+exactly this reason.
 
 ### Also outstanding
 
+- **CI/CD pipeline**: Windows jobs green, Linux jobs failed on first run and were fixed
+  by reading error text (no local Linux toolchain available — see §2). **Not yet
+  re-confirmed green** — check `gh run list --branch <branch>` before assuming the fix
+  landed. If still red, get the exact error with `gh run view --job <id> --log-failed`
+  before changing anything; do not guess.
 - **Motion planner** (ADR-0007): extraction exact, timing 13% fast. Ranked suspects are in
   STATE.md. Do not delete the subprocess until parity is proven.
 - **Reported time is the input's, not the output's.** No second estimator pass, and the
   `; estimated printing time` comment in the output is never rewritten.
+- **`SqliteProfileRepository`** (reading the legacy `.sdb` as an *import* source into
+  `ProfileStore`, not a live read path) is designed but not built. Must invert the bias
+  on import (§4) and say so explicitly.
 - **Nothing has been validated by a real print.** This remains the only gap that cannot be
   closed from a desk.
 
@@ -151,3 +196,11 @@ Printer (= EXTRUDER row)   name, kinematics/config.json, rise, fall, smoothing,
 - Keep `STATE.md` current; it is the agreed resumption contract.
 - The user's constraint from day one: **work is intermittent and pauses for weeks.**
   Compartmentalise, and leave things in a state where the next step is written down.
+- **GitHub work uses `gh`, authenticated as the user (`AMOVFC`), against their fork.**
+  `origin` is the fork, `upstream` is `sb53systems/...` — never push or open a PR against
+  `upstream` without being asked explicitly. One PR (#1) tracks this branch against
+  `origin/main`; push to the branch and it updates automatically, no new PR needed.
+  `gh` is at `$env:ProgramFiles\GitHub CLI\gh.exe` and not on `PATH` by default in a
+  fresh shell — prepend it. Repo-level settings (branch protection, secret scanning,
+  vulnerability reporting) were configured via `gh api`, not the web UI; see the commit
+  that introduced `.github/workflows/` for the exact calls if they need reproducing.

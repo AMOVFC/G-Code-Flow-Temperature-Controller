@@ -36,9 +36,17 @@ else()
         -Wsign-conversion
         -Wdouble-promotion
         -Wformat=2
-        -Wnull-dereference
     )
 endif()
+
+# -Wnull-dereference is deliberately NOT enabled.
+#
+# It is an optimizer-level diagnostic (emitted after inlining, not at parse time), so it
+# does not reliably attribute a finding to the header it actually came from. On the CI
+# image's GCC 13 it fires inside libstdc++'s own <streambuf> whenever std::ofstream is
+# used with -O2 -- confirmed by reading the error location, which points at
+# /usr/include/c++/13/streambuf, not any file in this project. There is nothing in our
+# source to fix. Revisit if a future toolchain resolves the false positive.
 
 # -Wconversion is deliberately on.
 #

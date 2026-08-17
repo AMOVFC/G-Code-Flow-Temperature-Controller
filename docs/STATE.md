@@ -4,12 +4,17 @@
 > "where are we and what happens next". Update it at the end of every work session,
 > even a short one. A stale STATE.md is worse than none.
 
-**Last updated:** 2026-08-07
-**Current milestone:** M8 — Profile database, then Qt frontend
-**Build status:** ✅ green — 48/48 tests passing (MSVC 19.44, Ninja, C++20)
+**Last updated:** 2026-08-10
+**Current milestone:** M8 — Profile management UI (storage done, wiring next), then real print validation
+**Build status:** ✅ green on Windows (MSVC 19.44, Ninja, C++20) — 61/61 tests passing.
+Linux CI (GCC + Clang) was red on the first pipeline run and is fixed as of the latest
+commit, **not yet re-confirmed green** — see "CI/CD pipeline" below.
 
-> **The tool works end to end.** `sb53 process` produces a real, valid output file.
-> See "Using it" below.
+> **The tool works end to end**, with a local web UI. `flowtemp serve` opens a browser
+> page; `flowtemp process` runs headless as a slicer post-processing script. See
+> [README.md](../README.md) for user-facing instructions — this file is the build log.
+>
+> **Still true after every change below: nothing has been validated by a real print.**
 
 ## How to build
 
@@ -77,16 +82,28 @@ next until the current one's exit criteria are met and this file is updated.
 | **M4** | **Temperature planner** | ✅ **done** | ~~Blend → smooth → map → slew-limit, each unit tested~~ |
 | **M5** | **G-code rewriter** | ✅ **done** | ~~Valid output G-code; feedrate clamp and PA gating verified~~ |
 | **M6** | **CLI end-to-end** | ✅ **done** | ~~`sb53 process in.gcode` produces a printable file~~ |
-| **M7** | **Differential validation vs. legacy** | ✅ **done** | ~~Temperature curves track the legacy binary within tolerance~~ — correlation **+0.867** |
-| **M8** | **Profile database + Qt frontend** | 🟡 in progress | Reads the existing `Config.sdb`; UI parity, restructured per ARCHITECTURE.md |
-| M9 | Physical validation | ⚪ not started | Test prints succeed on real hardware |
+| **M7** | **Differential validation vs. legacy** | ✅ **done** | ~~Temperature curves track the legacy binary within tolerance~~ — correlation **+0.9947** against the user's real calibration |
+| **M8a** | **Web UI** (superseded the planned Qt frontend — see [ADR-0004 addendum below](#web-ui-superseded-qt)) | ✅ **done** | ~~Charts, controls, file picker, safe (non-overwriting) output~~ |
+| **M8b** | **Saved printer/filament profiles** | 🟡 **in progress** | Storage layer done and tested; **UI wiring (list/save/duplicate/load) not started** |
+| **M8c** | **CI/CD pipeline** | 🟡 **in progress** | Windows jobs green; Linux fix pushed, not yet re-confirmed |
+| M9 | Physical print validation | ⚪ not started | Test prints succeed on real hardware — **the only gap that can't be closed from a desk** |
 
-**M6 is the real milestone.** At that point the tool is genuinely useful with no GUI at
-all, and it is the artifact the future OrcaSlicer cloud plugin needs.
+**M6 was the real functional milestone** — at that point the tool became genuinely useful
+with no GUI at all, which is the artifact the future OrcaSlicer cloud plugin needs. M8a
+(web UI) is what makes it comfortable for daily use; M8b (profiles) is what removes the
+remaining workflow friction (retyping calibration every run).
 
 ---
 
 ## Current position
+
+> **Note on the binary name in older entries below.** The executable was originally
+> `sb53.exe` and was renamed to `flowtemp.exe` partway through the project (so it cannot
+> be confused with the legacy `SB53-Systems.exe` in a folder listing or taskbar). The
+> milestone log below is left as written — each entry is an accurate record of what was
+> true when it was written — so commands quoted in the M2–M6 entries still say
+> `sb53.exe`. Substitute `flowtemp.exe` if copy-pasting one. Every command in "Using it"
+> and everything from M8a onward already uses the current name.
 
 ### Done
 - Reviewed the legacy application in full; established that it cannot be built.
@@ -314,6 +331,136 @@ Calibration flags are placeholders until the profile database lands at M8.
   moves, zero offset fits best by a factor of three (1265 vs ~4000 mm/min mean error at
   any shift). So the difference is not a lead/lag effect.
 
+### M8a complete: local web UI <a name="web-ui-superseded-qt"></a>
+
+**Supersedes the Qt frontend planned in earlier phases.** No Qt was installed on the
+development machine; rather than treat that as a blocker, a local web UI was built
+instead, and on reflection it is the better long-term choice — it is the same shape as
+the eventual OrcaSlicer cloud-plugin integration, whereas Qt was always going to be
+thrown away once that plugin existed. `sb53::web` lives in `cli/`, calls core through the
+same interfaces the CLI uses, and contains no algorithm logic — the `core-has-no-qt`
+architectural guard is unaffected.
+
+`flowtemp serve [--port 8765]` binds to **127.0.0.1 only** (never exposed to the
+network — the process reads/writes arbitrary files and opens native dialogs) and serves a
+single-page UI: file picker (`GetOpenFileNameW` via `/api/browse`), calibration form,
+Analyse, Process & write.
+
+**Safety property, verified end to end:** the web UI **never overwrites the input file.**
+Output is a filename *suffix* (default `-flowtemp`); a second run numbers the file rather
+than clobbering the first; if a suffix would resolve back to the input the request is
+refused. This was a deliberate fix after the first design took a full path and defaulted
+to overwriting — correct for the CLI's slicer-hook use case, dangerous for a UI where you
+just browsed to a file and clicked a button. The CLI's `process --out` still overwrites
+in place when no `--out` is given, because OrcaSlicer's post-processing contract requires
+it; that split is intentional, not an inconsistency.
+
+**Chart controls:** expand (fullscreen, Escape closes), zoom in/out/reset, drag to pan,
+scroll to zoom about the cursor. Below the chart, **"worth a look"** auto-detects and
+highlights the moments a user actually wants to inspect — peak flow, hottest/coolest
+points (flagged when they sit at the calibrated band's edges), the sharpest one-second
+temperature swing, and the fastest layer. Clicking one zooms straight there. This is not
+decorative: on a real 192-layer benchy it surfaced **layer 167 completing in 0.31 s**,
+which nobody would spot by eye and is exactly the case fast-layer cooling exists for.
+Verified by driving the actual rendered page (`mcp__Claude_Browser__javascript_tool`),
+not by grepping the HTML — markup being present has previously masked broken behaviour.
+
+**User-editable overrides**, all optional and all off/blank by default:
+- **Printer limits** (max velocity, max acceleration, square corner velocity, Z velocity,
+  Z acceleration) — written into an amended `config.json` in the scratch directory, never
+  the user's file. Z is called out specifically in the UI because it is the *only* machine
+  limit measured to change print time on a small model (192 layers = 192 Z moves; 20→100
+  mm/s took 7m58s→7m15s on the reference benchy).
+- **Flow bounds** (`--min-flow`, `--max-flow`) with an explicit on/off switch for the
+  hard ceiling. **The hard limit is marked experimental in the UI itself**, in plain
+  language: it does not hold flow at the entered number (the real constraint is what the
+  filament can flow at the *planned temperature*; the ceiling only removes moves that
+  were escaping that budget), it changes feedrate reductions from ~2,000 to ~49,000
+  (essentially every extruding move), and no physical print has tested it. Off is the
+  default and the behaviour validated against the legacy tool.
+- **Fast-layer cooling** (`--cool-below`, `--cool-drop`) — off by default, applied before
+  slew limiting, clamped to the filament's calibrated minimum.
+
+**A cross-check against silent misconfiguration was added and is load-bearing:** the
+scanner now reads the slicer's own `; estimated printing time` comment, and
+`checkTimingAgainstSlicer` warns (`Code::PrinterConfigMismatch`) when computed time
+disagrees with it by more than ~40%. This is the fix for the exact failure class recorded
+below at "printer config is 12x wrong" — a config describing the wrong printer produces
+an entirely self-consistent but wrong result, and this is the only independent check
+available. Verified firing correctly against a deliberately stale config (13m 1s
+computed vs. 7m 19s slicer estimate) and staying silent once the correct `printer.cfg`
+values were loaded (7m 15s vs. 7m 19s, under 1% apart).
+
+### M8b in progress: saved profiles — storage done, UI not started
+
+Requested workflow improvement: **save printers, and save filament profiles within a
+printer that inherit most settings and override one or two.** All calibration is
+currently typed into the form on every run, which is the main remaining friction.
+
+**`core/include/sb53/ProfileStore.hpp` + `.cpp` are complete and tested** (8 new tests,
+61/61 total). Design mirrors the legacy `EXTRUDER` → `FILAMENT` containment deliberately,
+because that containment *is* the requested feature: a `SavedFilament` belongs to a
+`SavedPrinter` and carries only what differs from it, so "keep most settings, change one"
+means duplicating a filament under the same printer and editing a field — never
+re-entering machine or hotend values. Stored as hand-rolled JSON (no dependency pulled in
+for this) at `%LOCALAPPDATA%\flowtemp\profiles.json`; writes go to a temp file and are
+renamed into place so an interrupted save cannot truncate existing data. **Deliberately
+not written to the legacy `Config.sdb`** — that file is irreplaceable user calibration
+data (ADR-0003). The logic lives in `core`, not the web layer, so the eventual OrcaSlicer
+plugin inherits it rather than reimplementing it.
+
+**What is NOT done: nothing in the web UI reads or writes this yet.** The form still
+starts blank every time. Remaining work, small and fully specified:
+- `GET /api/profiles` → the printer/filament tree as JSON
+- `POST /api/profiles/save` → upsert a `SavedPrinter`/`SavedFilament` from the current
+  form fields
+- Two dropdowns (printer, filament-within-printer) + a name field + Save/Duplicate buttons
+- Selecting a printer fills the machine-limit fields; selecting a filament fills only the
+  filament fields, leaving the machine fields alone
+- **Importing from `Config.sdb` must invert the bias** (`ourBias = 10 - stored`) — see the
+  ADR-0006 addendum — and should say so explicitly when it does, the same way the timing
+  mismatch warning is explicit rather than silent.
+
+### M8c in progress: CI/CD pipeline
+
+`.github/workflows/ci.yml` and `security.yml` were added: build matrix (Windows MSVC
+release+debug, Linux GCC+Clang), ctest, ASan+UBSan, clang-tidy, coverage with a 60% floor,
+CodeQL, gitleaks, licence compliance, CycloneDX SBOM, libFuzzer over the scanner/parser/
+profile-reader input boundaries, and two architectural guards (`core` has no Qt, `core`
+never prints). Branch protection on `main` requires `windows-msvc-release`, `linux-gcc`,
+`architectural guards`, `licence compliance` to merge; deliberately does **not** require
+coverage/fuzz/CodeQL, which are slower and occasionally flaky — a required check people
+learn to ignore is worse than none. `enforce_admins` is off so the repo owner is never
+locked out. GitHub-side settings (private vulnerability reporting, secret scanning +
+push protection, Dependabot alerts) were enabled via `gh api`, not the web UI.
+
+**First pipeline run: all 3 Windows jobs passed, all Linux/CodeQL/fuzz/coverage jobs
+failed.** This is exactly the value proposition of a second compiler — every failure
+traced to portability defects invisible on MSVC:
+
+| Defect | Where | Why MSVC didn't catch it |
+|---|---|---|
+| `std::string out` shadowing the `std::ostream& out` parameter | `GcodeRewriter.cpp` (inside `replaceWord` lambda) | MSVC has no `-Wshadow` equivalent enabled by default; GCC/Clang do |
+| Unused `slice()` helper, dead since an earlier refactor | `ProfileStore.cpp` | MSVC doesn't warn on unused free functions the way `-Wunused-function` does |
+| `std::isfinite` used without `#include <cmath>` | `test_curvecompare.cpp`, `test_planner.cpp` | MSVC's header graph pulls in `<cmath>` transitively; not guaranteed elsewhere |
+| `std::abs(double)` used with only `<algorithm>` included | `cli/main.cpp` (feedrate diff in `kinematics-check`) | **Not just a portability nit** — `std::abs(double)` lives in `<cmath>`; if only `<cstdlib>`'s `int std::abs(int)` were visible, the double argument would silently truncate via implicit conversion. Every duration compared there is under 1 second, so this would have made the whole per-move diagnostic silently report 0 for every move — exactly the "looks fine, is wrong" failure class this project exists to catch, just in the test tooling instead of the product |
+| `-Wnull-dereference` false positive inside libstdc++'s own `<streambuf>` | (not our code) | GCC-only; confirmed by reading the error location (`/usr/include/c++/13/streambuf`, not any file in this repo) — an optimizer-level diagnostic emitted after inlining, which does not reliably attribute to the header it came from. Removed from the warning set with a comment explaining why, rather than silenced project-wide or ignored |
+
+Fixed in the commit immediately following the pipeline's first run. **Rebuilt and
+re-tested on MSVC only (61/61 green)** — there is no local Linux/GCC/Clang toolchain
+available on the development machine (checked: no WSL distro installed, no Docker, no
+native compiler), so these fixes are verified by precisely reading each compiler's error
+output and reasoning about the fix, not by reproducing the failure locally. **The
+authoritative verification is the next CI run on this branch** — check
+`gh run list --branch claude/frontend-modernization-plan-9444f8` before assuming green.
+
+A broader sweep for the same class of mistake (missing `<functional>`, `<memory>`,
+`<numeric>`, `<limits>`, `<optional>`) was run across the whole tree and found no further
+instances — the remaining hits were false positives resolved through the file's own
+paired header (e.g. `WebUI.cpp` gets `<functional>` via `WebUI.hpp`, which does include it
+directly), which is a controlled, intentional transitive path and not the kind of
+implicit standard-library-internals dependency that caused the real bugs above.
+
 ### In progress: own motion planner (ADR-0007)
 
 Goal: drop the `klipper_estimator.exe` subprocess so the tool is a single artefact and
@@ -368,35 +515,26 @@ reference that we are not applying. In likely order:
 **Do not remove the subprocess path until parity is demonstrated** — ADR-0007 requires it,
 and every flow and temperature number downstream depends on these timings.
 
-### In progress (M8)
-Nothing implemented yet. `tools/dump-profiles.py` reads the schema today; the C++
-`SqliteProfileRepository` is still to be written, and **must invert the bias on import**.
+### Next concrete action: wire ProfileStore into the web UI
 
-### Next concrete action: profile management (requested 2026-08-09)
+Storage is done (M8b above). What remains is small and fully specified — see the bullet
+list under "M8b in progress" above for the exact endpoints and UI elements needed. Budget
+this as the next single session; it does not require re-deriving anything.
 
-The user wants to **save printers, and save filament profiles within a printer that
-inherit most settings and override one or two**. Nothing exists — all calibration is typed
-in on every run, which is the main remaining friction in the workflow.
+### After that, in rough priority order
 
-Design and rationale are in [AI-CONTEXT.md §7](AI-CONTEXT.md). In short: mirror the
-existing `EXTRUDER` → `FILAMENT` shape, store as JSON under `%LOCALAPPDATA%\flowtemp\`,
-put the logic in **core** behind `IProfileRepository` (not the web layer), and treat
-"duplicate this profile" as the core of the inheritance feature.
+1. **Re-confirm CI is green**, including on Linux. Not yet verified — see "M8c" above.
+2. **`SqliteProfileRepository`** — vendor the SQLite amalgamation and read the existing
+   `Config.sdb` schema unchanged ([ADR-0003](adr/0003-sqlite-in-core.md)) as an *import*
+   path into `ProfileStore`, not a live read path. Auto-select by matching the G-code's
+   `printer_settings_id` / `filament_settings_id`, and **say so when falling back** — the
+   legacy silently used row 0. **Must invert the bias on import** (`10 - stored`).
+3. **Continue the motion planner** (ADR-0007) — see its own section above for the ranked
+   next investigation steps. Not urgent: the subprocess path works and is validated.
+4. Real print validation (M9) — blocked on the user having hardware time, not on any
+   remaining engineering task.
 
-### Then, in this order:
-
-1. **`SqliteProfileRepository`** — vendor the SQLite amalgamation and read the existing
-   `Config.sdb` schema unchanged ([ADR-0003](adr/0003-sqlite-in-core.md)). This removes
-   the CLI's hard-coded calibration placeholders, which is the last thing standing
-   between the tool and real use. Auto-select by matching the G-code's
-   `printer_settings_id` / `filament_settings_id`, and **say so when falling back** —
-   the legacy silently used row 0.
-2. **Qt 6 frontend** ([ADR-0002](adr/0002-core-ui-separation.md), and
-   [ADR-0004](adr/0004-custom-chart-widget.md) for the chart).
-
-> Worth doing early in M8: the printer-config mismatch diagnostic noted above. Comparing
-> the G-code's `SET_VELOCITY_LIMIT` values against the loaded `config.json` would have
-> flagged the 12x acceleration discrepancy immediately.
+Qt frontend is **no longer planned** — superseded by the web UI (M8a, see above).
 
 ---
 

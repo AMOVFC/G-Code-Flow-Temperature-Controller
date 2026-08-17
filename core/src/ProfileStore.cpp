@@ -42,11 +42,6 @@ std::string num(double v)
 // enough. Tolerant by design: an unknown or missing key leaves the default in place
 // rather than failing the load, so an older profiles.json still opens.
 
-std::string_view slice(std::string_view s, std::size_t from, std::size_t to)
-{
-    return s.substr(from, to - from);
-}
-
 std::size_t matchBrace(std::string_view s, std::size_t open)
 {
     const char c = s[open];
