@@ -102,6 +102,11 @@ void readStr(std::string_view s, std::string_view key, std::string& out,
     std::string value;
     for (std::size_t i = at + 1; i < s.size() && s[i] != '"'; ++i) {
         if (s[i] == '\\' && i + 1 < s.size()) {
+            // Deliberately advances past the backslash onto the escaped character so the
+            // switch below reads it, not the backslash itself; the outer for-loop's own
+            // ++i then moves past that character to whatever follows. Flagged by CodeQL
+            // (cpp/loop-variable-changed) as worth a second look; traced correct and
+            // covered by an escape-sequence round-trip test in test_profilestore.cpp.
             ++i;
             switch (s[i]) {
             case 'n': value += '\n'; break;

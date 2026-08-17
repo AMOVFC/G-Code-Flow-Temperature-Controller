@@ -27,6 +27,18 @@ target_link_libraries(sb53_core
     PRIVATE sb53_warnings sb53_werror
 )
 
+# Coverage instrumentation, scoped to this target only.
+#
+# Deliberately NOT applied at the top-level CMakeLists.txt scope: that instruments every
+# target built afterward, including Catch2 fetched into tests/, and gcovr's report step
+# crashes trying to resolve Catch2's source paths on the CI runner. sb53_core is the only
+# thing CI's gcovr invocation actually reports on (--filter 'core/'), so it is the only
+# thing that needs instrumenting.
+if(SB53_COVERAGE AND NOT MSVC)
+    target_compile_options(sb53_core PRIVATE --coverage -O0 -g)
+    target_link_options(sb53_core PRIVATE --coverage)
+endif()
+
 # Deliberately absent, and intended to stay absent:
 #   find_package(Qt6 ...)
 #   target_link_libraries(sb53_core ... Qt6::Core)

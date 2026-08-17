@@ -67,10 +67,20 @@ if(SB53_SANITIZE)
     endif()
 endif()
 
-if(SB53_COVERAGE AND NOT MSVC)
-    add_compile_options(--coverage -O0 -g)
-    add_link_options(--coverage)
-endif()
+# Coverage flags are deliberately NOT set here.
+#
+# This used to be `add_compile_options(--coverage ...)` at global scope, which instruments
+# every target created afterward -- including Catch2, pulled in via FetchContent inside
+# tests/CMakeLists.txt. Catch2's own .gcda files then exist at coverage-report time, gcov
+# tries to resolve their embedded source paths against the runner's directory layout and
+# fails, and gcovr aborts the whole run with "Worker thread raised exception, workers
+# canceled" -- not a graceful per-file skip, a hard failure of the entire coverage job.
+# We only ever wanted coverage numbers for sb53_core (the gcovr invocation in CI already
+# passes --filter 'core/'), so instrumenting anything else was pure waste and the direct
+# cause of the crash. Coverage compile flags are applied to sb53_core specifically in
+# core/CMakeLists.txt; the corresponding link flag lives on the test executable in
+# tests/CMakeLists.txt, since that is where sb53_core's instrumented calls into the gcov
+# runtime actually get resolved.
 
 if(SB53_FUZZ)
     # libFuzzer is clang-only. The parsers it targets consume untrusted input: G-code

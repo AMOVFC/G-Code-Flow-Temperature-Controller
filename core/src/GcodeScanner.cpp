@@ -81,6 +81,12 @@ double parseDuration(std::string_view text)
             if (ec == std::errc{}) {
                 number = v;
                 haveNumber = true;
+                // Deliberately advances the loop index past the digits from_chars just
+                // consumed, so the outer for-loop's own ++i lands on the character right
+                // after the number (its unit letter) rather than re-scanning digits one
+                // at a time. `-1` compensates for that same ++i. Flagged by CodeQL
+                // (cpp/loop-variable-changed) as worth a second look; traced correct and
+                // covered by a multi-digit test in test_scanner.cpp.
                 i += static_cast<std::size_t>(ptr - begin) - 1;
             }
             continue;

@@ -138,6 +138,30 @@ TEST_CASE("unknown keys and missing fields keep defaults", "[profiles]")
     CHECK(s.printers().front().filaments.front().bias == 7);
 }
 
+TEST_CASE("names containing actual control characters survive", "[profiles]")
+{
+    // The previous test covers literal backslashes (path separators) and embedded
+    // quotes, but never exercised the \n/\t/\r escape-sequence branches in the reader --
+    // a real coverage gap, since a name with those characters had never been round
+    // tripped. toJson()'s quote() writes them escaped; fromJson() must read them back as
+    // the original control character, not as the two-character escape sequence itself.
+    auto p = samplePrinter();
+    p.name = "line one\nline two\tindented\r\nwindows-style";
+    ProfileStore store;
+    store.upsert(p);
+
+    const std::string json = store.toJson();
+    // Confirm the writer actually escaped it -- otherwise this test would trivially pass
+    // by both sides being wrong in the same way.
+    CHECK(json.find("line one\nline two") == std::string::npos);
+    CHECK(json.find("\\n") != std::string::npos);
+
+    DiagnosticList d;
+    const auto restored = ProfileStore::fromJson(json, d);
+    REQUIRE(restored.printers().size() == 1);
+    CHECK(restored.printers().front().name == p.name);
+}
+
 TEST_CASE("names containing quotes and backslashes survive", "[profiles]")
 {
     // OrcaSlicer writes filament ids wrapped in quotes, and Windows paths are full of

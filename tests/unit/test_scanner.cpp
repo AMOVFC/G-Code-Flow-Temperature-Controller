@@ -1,6 +1,7 @@
 #include "sb53/GcodeScanner.hpp"
 #include "sb53/Version.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
@@ -8,6 +9,7 @@
 #include <sstream>
 
 using namespace sb53;
+using Catch::Approx;
 
 namespace {
 
@@ -167,6 +169,86 @@ TEST_CASE("slicer identity is read from the config block after the body", "[scan
 
     // Surrounding quotes are OrcaSlicer's escaping, not part of the profile name.
     CHECK(r.filamentSettingsId == "Elegoo HS PLA+ awd hott");
+}
+
+TEST_CASE("parseDuration handles the slicer's d/h/m/s form", "[scanner][parse][duration]")
+{
+    // The scanner reads the slicer's own "; estimated printing time" comment as an
+    // independent cross-check against a printer config describing the wrong machine
+    // (checkTimingAgainstSlicer in FlowAnalysis.cpp). If this parses wrong, that check
+    // either fires spuriously or, worse, stays silent when it should not.
+
+    SECTION("single unit, single digit") {
+        CHECK(detail::parseDuration("5s") == Approx(5.0));
+        CHECK(detail::parseDuration("9h") == Approx(9.0 * 3600.0));
+    }
+
+    SECTION("multi-digit numbers -- the case CodeQL flagged the parsing loop over") {
+        // The loop advances its index past every digit `from_chars` consumed, not one
+        // digit at a time. A single-digit test would not exercise that jump at all.
+        CHECK(detail::parseDuration("123s") == Approx(123.0));
+        CHECK(detail::parseDuration("45m") == Approx(45.0 * 60.0));
+        CHECK(detail::parseDuration("100d") == Approx(100.0 * 86400.0));
+    }
+
+    SECTION("the exact real-world value this feature was built to catch") {
+        // From the user's own slicer output, ALGORITHM.md and STATE.md both cite this:
+        // a config for the wrong printer produced 13m 1s against this figure.
+        CHECK(detail::parseDuration("7m 19s") == Approx(7.0 * 60.0 + 19.0));
+    }
+
+    SECTION("full d/h/m/s form, and a multi-digit number in every position") {
+        // 1 day, 23 hours, 59 minutes, 8 seconds -- every field multi-digit except the
+        // day, so each unit's digit-run is exercised at least once in this one string.
+        const double expected = 1.0 * 86400.0 + 23.0 * 3600.0 + 59.0 * 60.0 + 8.0;
+        CHECK(detail::parseDuration("1d 23h 59m 8s") == Approx(expected));
+    }
+
+    SECTION("any subset, any order, per the function's documented contract") {
+        CHECK(detail::parseDuration("2h 5s") == Approx(2.0 * 3600.0 + 5.0));
+        CHECK(detail::parseDuration("5s 2h") == Approx(2.0 * 3600.0 + 5.0));   // order-independent
+        CHECK(detail::parseDuration("30m") == Approx(30.0 * 60.0));
+    }
+
+    SECTION("degenerate input does not crash or return garbage") {
+        CHECK(detail::parseDuration("") == Approx(0.0));
+        CHECK(detail::parseDuration("garbage") == Approx(0.0));
+        CHECK(detail::parseDuration("s") == Approx(0.0));   // a unit letter with no number
+    }
+}
+
+TEST_CASE("the scanner reads the slicer's own time estimate", "[scanner][duration]")
+{
+    // This is what feeds checkTimingAgainstSlicer's cross-check against a printer config
+    // describing the wrong machine (STATE.md "M8a", the printer-config-mismatch fix).
+    // No test previously exercised the scanner actually populating this field from a
+    // real comment line -- only the low-level parser above was covered.
+
+    SECTION("real OrcaSlicer comment format") {
+        DiagnosticList diags;
+        const auto r = scanText(
+            "M83\n;HEIGHT:0.2\nG1 X1 E1\n; PRINT_END\n"
+            "; estimated printing time (normal mode) = 7m 19s\n",
+            diags);
+        CHECK(r.slicerEstimatedTime == Approx(7.0 * 60.0 + 19.0));
+    }
+
+    SECTION("absent comment leaves it at zero, not garbage") {
+        DiagnosticList diags;
+        const auto r = scanText("M83\n;HEIGHT:0.2\nG1 X1 E1\n; PRINT_END\n", diags);
+        CHECK(r.slicerEstimatedTime == Approx(0.0));
+    }
+
+    SECTION("only the first occurrence is used") {
+        // Guards against a later, unrelated comment overwriting a value already read.
+        DiagnosticList diags;
+        const auto r = scanText(
+            "M83\n;HEIGHT:0.2\nG1 X1 E1\n; PRINT_END\n"
+            "; estimated printing time (normal mode) = 7m 19s\n"
+            "; estimated printing time (silent mode) = 8m 0s\n",
+            diags);
+        CHECK(r.slicerEstimatedTime == Approx(7.0 * 60.0 + 19.0));
+    }
 }
 
 TEST_CASE("comment value parsing tolerates spacing and rejects near-misses", "[scanner][parse]")

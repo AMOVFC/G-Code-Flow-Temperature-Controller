@@ -38,6 +38,16 @@ target_link_libraries(sb53_unit_tests
     PRIVATE sb53::core sb53_warnings Catch2::Catch2WithMain
 )
 
+# sb53_core's object files are instrumented (see core/CMakeLists.txt) and call into the
+# gcov runtime to record execution and flush .gcda files at exit. Those symbols are
+# resolved when the final executable is linked, not when the static library is archived,
+# so the link flag belongs here -- deliberately NOT compiling this executable's own
+# sources or Catch2 with --coverage, since we only report on core/ (see the top-level
+# CMakeLists.txt comment for why that used to crash the coverage job entirely).
+if(SB53_COVERAGE AND NOT MSVC)
+    target_link_options(sb53_unit_tests PRIVATE --coverage)
+endif()
+
 # Fixture location. Committed fixtures under testdata/fixtures/ are always present;
 # full-size files under testdata/reference/ are git-ignored, so tests using those must
 # skip gracefully when absent (see testdata/README.md).
