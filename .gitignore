@@ -1,0 +1,33 @@
+# Build output
+build/
+out/
+cmake-build-*/
+_deps/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# Compiled binaries (the legacy bin/ and Source/V1.2/ .exe files are tracked
+# deliberately — they are the reference implementation, see ADR-0005)
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+*.ilk
+
+# Test artifacts
+testdata/scratch/
+Testing/
+
+# Full-size reference G-code: 7.6 MB of inputs, too large to version.
+# Identified by SHA-256 in testdata/manifest.json, which IS committed.
+# The trimmed fixtures in testdata/fixtures/ are committed. See testdata/README.md.
+testdata/reference/
+
+# OS
+Thumbs.db
+.DS_Store

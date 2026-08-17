@@ -1,0 +1,30 @@
+# CodeQL scan scope and query exclusions.
+#
+# Two adjustments, both justified by findings from the first real scan of this repo
+# rather than applied speculatively -- see the PR/commit that added this file for the
+# alert numbers this addresses.
+
+paths-ignore:
+  # Vendored, fetched-at-configure-time third-party source (Catch2, pinned by git tag in
+  # tests/CMakeLists.txt). Not our code, not something we would patch even if a real
+  # finding turned up here -- we would bump the pinned version instead. Scanning it
+  # produced ~40 findings against Catch2's own internals with zero actionability for this
+  # project, and it should never have been in scope: it is a build output, not a
+  # committed source path.
+  - build/**
+
+query-filters:
+  # cpp/unused-static-function fires on every TEST_CASE(...) in every *.cpp under tests/,
+  # and on ordinary static helper functions only called from inside one -- both verified
+  # by hand, not assumed. Catch2's TEST_CASE macro expands to a function registered via a
+  # global object's constructor and invoked later through Catch2's own test-runner
+  # dispatch, which CodeQL's static reachability analysis does not trace through. Every
+  # one of those functions genuinely runs: `ctest` executes and passes all of them. This
+  # is a known false-positive pattern for macro-registration test frameworks (the same
+  # shape of issue affects GoogleTest's TEST() macro), not a defect in this project.
+  #
+  # Scoped to this one rule ID rather than excluding tests/ wholesale, so every other
+  # query -- including the security-relevant ones this workflow explicitly opts into via
+  # security-extended and security-and-quality -- still analyses test code normally.
+  - exclude:
+      id: cpp/unused-static-function

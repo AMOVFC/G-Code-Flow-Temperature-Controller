@@ -1,6 +1,448 @@
 ![image](https://github.com/user-attachments/assets/b5b84ecc-84e5-4583-97c8-efdcdf985504)  
 # G-Code Flow & Temperature Controller
 
+> **This repository contains two implementations.**
+>
+> - **`flowtemp.exe` (C++)** — an in-progress clean-room rewrite, with a local web
+>   interface. Build and usage instructions are immediately below.
+> - **The original Delphi application (V1.1)** — the released, GUI version. Its
+>   documentation begins at [Original Delphi Version](#original-delphi-version-v11).
+>
+> The rewrite reproduces the original's temperature curve to within ~1 °C
+> (correlation +0.9947 on a matched benchy). It has **not yet been validated by test
+> prints** — see [Status](#status).
+
+---
+
+# The C++ rewrite (`flowtemp.exe`)
+
+> **The two applications are named differently on purpose.** The original is
+> `SB53-Systems.exe`; this one is `flowtemp.exe`, and it announces itself as
+> "C++ Edition" in its output, its window title and the web page. They produce similar
+> files and only one of them has been validated by real prints — you should never be in
+> doubt about which you just opened.
+
+## Status
+
+| | |
+|---|---|
+| G-code analysis, temperature planning, rewriting | ✅ working |
+| Local web interface with charts | ✅ working |
+| Command-line tool / slicer post-processing script | ✅ working |
+| Validated against the original tool | ✅ +0.9947 curve correlation |
+| Timing agrees with the slicer | ✅ within 1% (7m 15s vs 7m 19s) |
+| Fast-layer cooling | ✅ working, off by default |
+| Hard flow limit | ⚠️ experimental — read the warning in the UI |
+| **Validated by an actual print** | ❌ **not yet** |
+| Reads your existing `Config.sdb` profiles | ❌ not yet — calibration is entered by hand |
+| Own motion planner (no subprocess) | ❌ in progress, timing 13% off |
+
+> ⚠️ **Do not run output from this on a printer unattended.** It has never been physically
+> validated. Compare against the original tool's output first, and watch the first print.
+
+Detailed progress lives in [docs/STATE.md](docs/STATE.md). What the tool actually does,
+and why, is in [docs/ALGORITHM.md](docs/ALGORITHM.md).
+
+## Getting the executable
+
+There is **no prebuilt download yet** — you build it. This takes about two minutes.
+
+### Prerequisites
+
+**Visual Studio 2022** (Community is fine) with two workloads/components:
+
+- *Desktop development with C++*
+- *C++ CMake tools for Windows*
+
+That is everything. CMake, Ninja and the compiler all ship inside Visual Studio — you do
+**not** need a separate CMake install, and you do **not** need a "Developer Command
+Prompt". The build script finds them via `vswhere`.
+
+The **first** build downloads the Catch2 test framework from GitHub, so it needs network
+access once. Later builds work offline.
+
+### Build
+
+```powershell
+git clone <this-repo>
+cd G-Code-Flow-Temperature-Controller
+./tools/build.ps1
+```
+
+The executable lands at **`build/bin/flowtemp.exe`**.
+
+Options: `-Clean` wipes the build directory, `-Config Debug` builds unoptimised,
+`-NoTests` skips the test run. On failure the script prints the compiler errors and
+writes a full log to `build/build.log`.
+
+### The motion estimator — you do NOT run this yourself
+
+`flowtemp` does not compute kinematics itself; it calls **`klipper_estimator.exe`**. But it
+launches that automatically, as a subprocess, each time it processes a file.
+
+**There is no "run the estimator first" step.** One command does the whole job:
+
+```powershell
+flowtemp process myprint.gcode      # runs the estimator internally, twice
+```
+
+Two things only have to *exist*:
+
+| | |
+|---|---|
+| `klipper_estimator.exe` | already in this repository, at `bin/klipper_estimator.exe` |
+| a `config.json` beside it | your printer's motion limits — **one-time setup**, see the next section |
+
+`flowtemp` looks for the estimator next to its own executable and then in `bin/`;
+`--estimator <path>` overrides that. It then looks for `config.json` in the same folder as
+whichever estimator it used.
+
+> The bundled estimator is a **custom fork**, not upstream Annex-Engineering. Do not
+> substitute the upstream build; its output format is not guaranteed to match.
+
+## Configuring your printer (one time)
+
+`config.json` tells the estimator how fast your machine can actually move. **Getting this
+wrong silently corrupts everything downstream** — move timing drives the flow curve, which
+drives the temperature plan.
+
+### Option 1 — pull it from Klipper (best)
+
+```powershell
+./bin/klipper_estimator.exe --config_moonraker_url http://YOUR_PRINTER_IP dump-config > myconfig.json
+```
+
+### Option 2 — write it by hand from `printer.cfg`
+
+Map your Klipper settings across:
+
+| `config.json` | from `printer.cfg` |
+|---|---|
+| `max_velocity` | `[printer] max_velocity` |
+| `max_acceleration` | `[printer] max_accel` |
+| `square_corner_velocity` | `[printer] square_corner_velocity` |
+| `axis_limiter` → `max_velocity` / `max_accel` | `[printer] max_z_velocity` / `max_z_accel` |
+| `extruder_limiter` → `max_velocity` / `max_accel` | `[extruder] max_extrude_only_velocity` / `max_extrude_only_accel` |
+
+A worked example for a CoreXY Voron-derived machine is in
+[`testdata/printer-configs/awd-v0.json`](testdata/printer-configs/awd-v0.json).
+
+> **Sanity check:** run `flowtemp analyze` and compare its estimated time against your
+> slicer's. They should be within roughly 10%. If the tool reports far longer, your
+> `config.json` understates the machine's real limits.
+
+## Configuring filament profiles
+
+The rewrite does **not** read `Config.sdb` yet — calibration is passed as command-line
+flags. If you already have profiles in the original tool, read them out with:
+
+```powershell
+python tools/dump-profiles.py "path/to/Config/Config.sdb"
+```
+
+(Read-only; it cannot modify your database.)
+
+### What the numbers mean
+
+You supply **three (flow, temperature) points** and the tool interpolates linearly
+between them.
+
+| Flag | Meaning |
+|---|---|
+| `--low` / `--low-temp` | flow (mm³/s) and temperature (°C) at the low end |
+| `--mid` / `--mid-temp` | the middle calibration point |
+| `--high` / `--high-temp` | the high end |
+| `--rise` | how fast the hotend heats, °C per second |
+| `--fall` | how fast it **cools**, °C per second — usually much slower |
+| `--smoothing` | averaging window in seconds; 10–30 recommended |
+| `--bias` | **0 = quality, 10 = most aggressive** (see below) |
+| `--cool-below` / `--cool-drop` | fast-layer cooling (see below); `--cool-drop 0` disables |
+| `--adjust-pa` | enable pressure-advance adjustment (Klipper only) |
+| `--start-macro` / `--temp-token` | start-macro name and the parameter to rewrite (defaults `PRINT_START` / `EXTRUDER_TEMP`) |
+
+Flow points must be **strictly increasing** (`low < mid < high`) — the tool refuses
+otherwise, because the inverse mapping divides by the gaps between them.
+
+### The bias control
+
+`--bias 0` tracks each second's **average** flow: smoother temperature, fewer swings,
+gentler on sensitive filament. Higher values track the **peak** flow instead: hotter, more
+sustained flow, shorter prints. `--bias 10` is fully aggressive.
+
+> ⚠️ **This is the opposite of the original tool's stored value.** The original's
+> `SPEED_QUALITY_OPT` runs 0 = aggressive, 10 = quality. If you are copying a number out
+> of `Config.sdb`, **subtract it from 10**. A stored `3` corresponds to `--bias 7`.
+>
+> Using the value directly would give you prints roughly 14 °C colder than you are used
+> to, with no warning. Verified empirically — see
+> [ADR-0006](docs/adr/0006-explainable-blend-and-smoothing.md).
+
+Calibrating the three points is unchanged from the original tool; the visual method is
+described under [Ideal Flow/Temperature Calibration](#ideal-flowtemperature-calibration)
+below.
+
+### Hard flow limit — experimental
+
+There is a **max flow** field with an on/off switch. Leave it **off** unless you are
+specifically testing it; off is the behaviour that was compared against the original tool.
+
+Being blunt about what it does and does not do:
+
+- **It does not hold flow at the number you enter.** Set 105 and the peak comes out around
+  69, because the binding constraint is what the filament can flow at the *planned
+  temperature*. The ceiling only removes moves that were escaping that budget entirely.
+- Switching it on takes feedrate reductions from about **2,000 to about 49,000** —
+  essentially every extruding move. Arguably more correct, but a large change.
+- Measured cost is roughly one second on a benchy. That is one measurement on one file.
+- No test print has been done with it.
+
+The **min flow** field is separate and unaffected by the switch. It stops the tool slowing
+the print below a floor, and never speeds anything up beyond what the slicer asked.
+
+### Fast-layer cooling
+
+**New in the rewrite — the original tool has no equivalent.**
+
+On small or fast layers the previous layer has not set before the next lands on top of
+it, so it sags and loses definition — the classic drooping chimney on a Benchy. Slicers
+handle this by slowing down; this lowers the nozzle temperature instead, which stiffens
+the extrudate sooner without costing as much time.
+
+- `--cool-below <seconds>` — layers at or above this get no reduction.
+- `--cool-drop <°C>` — the reduction at zero layer time, ramping linearly up to the
+  threshold.
+
+Off by default, because it changes printed output. The reduction is always clamped to
+your calibrated low temperature — cooling never takes the nozzle somewhere you have not
+validated.
+
+> ⚠️ **Pick the threshold from your actual layer times, not by feel.** A Benchy at 8
+> minutes over 192 layers averages ~2.5 s per layer, so `--cool-below 15` cools
+> essentially the whole print and degenerates into a flat temperature offset. Run
+> `flowtemp serve` and look at the layer-timing chart, or check `median layer time` in the
+> web UI's statistics. For small models 3–5 s is usually the useful range.
+
+## Using it
+
+### The web interface (easiest)
+
+```powershell
+./build/bin/flowtemp.exe serve
+```
+
+Then open **http://127.0.0.1:8765** in your browser.
+
+Everything is on one page: **Browse…** to a file, set your calibration, press **Analyse**
+to see the flow curve, the resulting temperature curve and a per-layer timing chart —
+then **Process & write** when it looks right.
+
+**The output is always a new file.** The Output field is a filename *suffix*
+(default `-flowtemp`), the page shows the exact path it will write as you type, and your
+original is never modified. A second run numbers the file rather than clobbering the
+first.
+
+### Reading the chart
+
+| control | |
+|---|---|
+| **Expand** | full-window view; Escape closes it |
+| **+ / − / Reset** | zoom the time axis |
+| drag | pan |
+| scroll wheel | zoom about the cursor |
+
+Below the chart, **worth a look** lists the moments that usually matter — peak flow, the
+hottest and coolest points (flagged when they hit the ends of your calibrated range), the
+sharpest one-second temperature swing, and the fastest layer. Click any of them to zoom
+straight there.
+
+That last one earns its place: on a test benchy it found **layer 167 completing in
+0.31 s**, which is precisely the situation fast-layer cooling exists to address.
+
+The layer-timing strip underneath shows how long every layer takes and highlights those
+below your cooling threshold, so that number can be chosen from evidence rather than
+guessed.
+
+> The server binds to **loopback only** and is not reachable from your network. It is
+> still a local process that reads and writes files anywhere you can, so do not expose the
+> port.
+
+`--port 8765` changes the port. Ctrl+C stops it.
+
+### Inspect a file — changes nothing
+
+```powershell
+./build/bin/flowtemp.exe scan myprint.gcode
+```
+
+Reports extrusion mode, print-body bounds, detected printer/filament profiles, and
+whether the file has already been processed.
+
+### Analyse flow and preview the temperature plan — changes nothing
+
+```powershell
+./build/bin/flowtemp.exe analyze myprint.gcode --estimator bin/klipper_estimator.exe `
+    --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 `
+    --smoothing 20 --bias 7 --rise 5 --fall 1
+```
+
+Prints move count, estimated time, filament used, peak/mean flow, and an ASCII plot of
+flow against planned temperature. **Use this to check your settings before processing
+anything.**
+
+### Process a file
+
+```powershell
+./build/bin/flowtemp.exe process myprint.gcode --out processed.gcode `
+    --estimator bin/klipper_estimator.exe `
+    --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 `
+    --smoothing 20 --bias 7 --rise 5 --fall 1
+```
+
+Omit `--out` to overwrite in place — which is what a slicer post-processing hook expects.
+**This is the only path that overwrites anything.** The web UI always writes a new file
+beside the original.
+
+Other flags: `--cool-below` / `--cool-drop` for fast-layer cooling, `--min-flow` /
+`--max-flow` for flow bounds, `--adjust-pa` for pressure advance.
+
+Output is written to a scratch file and moved into place only on success, so a failed run
+can never leave a half-written file where your input was.
+
+### Compare two processed files
+
+```powershell
+./build/bin/flowtemp.exe compare old.gcode new.gcode
+```
+
+Extracts the commanded temperature sequence from each, indexes both by cumulative
+extruded filament, and reports correlation and differences. Use it to check the rewrite
+against the original tool, or to see what changing a setting actually did.
+
+### Exit codes
+
+`0` success · `1` error (details printed to stderr) · `64` bad usage
+
+Errors carry a stable machine-readable code alongside the message, e.g.
+`error: [absolute-extrusion-unsupported] ...`, so scripts can branch on the cause.
+
+## Slicer integration
+
+In OrcaSlicer, *Print Settings → Others → Post-processing Scripts*:
+
+```
+"C:\path\to\build\bin\flowtemp.exe" process --estimator "C:\path\to\bin\klipper_estimator.exe" --low 1 --mid 80 --high 105 --low-temp 220 --mid-temp 280 --high-temp 310 --smoothing 20 --bias 7 --rise 5 --fall 1
+```
+
+The slicer appends the G-code path, which `flowtemp` overwrites in place. The estimator
+runs inside that call — nothing else to configure in the slicer.
+
+**Requirements**, all enforced with a clear error rather than silently producing bad
+output:
+
+- **Relative extrusion (`M83`)** must be enabled. Absolute (`M82`) is rejected — flow
+  tracking is meaningless without it.
+- The file must not already be processed. Re-running would compound the adjustments.
+- Your end G-code needs `; PRINT_END` as its first line if the slicer does not emit
+  `; EXECUTABLE_BLOCK_END`.
+
+## Testing
+
+```powershell
+./tools/build.ps1              # builds and runs the whole suite
+```
+
+48 tests covering parsing, flow aggregation, temperature planning, the rewriter, and the
+comparison tool. They are hermetic — **no test spawns the estimator or touches your
+printer**; the estimator's output is replayed from a recorded fixture.
+
+Test fixtures live in `testdata/fixtures/` (committed, ~90 KB each). Full-size reference
+files are git-ignored but pinned by SHA-256 in `testdata/manifest.json`; tests needing
+them skip cleanly when absent. See [testdata/README.md](testdata/README.md).
+
+### Verifying against the original tool
+
+The safest way to gain confidence before printing: process the same file with both tools
+and compare.
+
+**Option A — scripted**
+
+```powershell
+./tools/make-testpair.ps1 -InputFile C:\prints\benchy.gcode `
+    -Legacy "D:\SB53_G-Code_Flow_Temperature_Controller_V1.1" `
+    -Low 1 -Mid 80 -High 105 -LowTemp 220 -MidTemp 280 -HighTemp 310 `
+    -Rise 5 -Fall 1 -Smoothing 20 -Bias 7
+```
+
+Produces `<name>-RAW`, `<name>-OLD-legacy` and `<name>-NEW-flowtemp` in a `testpair`
+folder, then prints the temperature-curve and feedrate comparisons.
+
+Everything runs on **copies**. The legacy tool overwrites the file it is handed and
+deletes it if you close its window, so your original is never given to it directly.
+
+> The script tries to drive the old GUI automatically, and often **cannot** — it opens a
+> modal dialog and needs a real interactive desktop. When that happens it says so and
+> prints exactly what to do by hand. Add `-SkipLegacy` to not attempt it at all.
+
+**Option B — by hand**
+
+1. Slice a model and keep the raw G-code.
+2. Open `SB53-Systems.exe`, load the raw file, press PROCEED, save the result.
+3. Run `flowtemp process` on the same raw file with matching calibration —
+   **remembering to invert the bias** (a stored `SPEED_QUALITY_OPT` of 3 means `--bias 7`).
+4. `flowtemp compare old.gcode new.gcode` — expect correlation above 0.95.
+5. Print both and compare.
+
+> ⚠️ **Check the legacy output actually contains `M104` commands.** If it has the
+> `; Edited by` header but no `M104`, it failed silently and the file is *not* processed
+> — see [known-bugs.md #11](docs/legacy/known-bugs.md). Do not print it, and do not use
+> it as a reference.
+
+> When capturing output from the original tool, **do not use its Close button** — it
+> deletes the input file when it was launched with a path argument.
+
+## Known limitations
+
+- **Profiles are not read from `Config.sdb` yet** — calibration is entered by hand. Read
+  yours out with `python tools/dump-profiles.py`.
+- **The hard flow limit is experimental** — see the section above.
+- **The motion planner still shells out to `klipper_estimator`.** An in-process
+  replacement is underway ([ADR-0007](docs/adr/0007-own-motion-planner.md)) so the tool
+  becomes a single artefact that can be *linked* into an OrcaSlicer plugin rather than
+  spawned. Move extraction is exact; timing is 13% off and not yet usable.
+- **Reported "estimated time" is the input's, not the output's** — there is no second
+  estimator pass, and the `; estimated printing time` comment in the output is not
+  rewritten.
+- Windows only. The core library is portable and builds on Linux, but process execution
+  is not implemented there.
+- Multi-tool and multi-material printing are not supported.
+- Arc moves (`G2`/`G3`) work but are slow — the estimator subdivides them.
+
+## What was found along the way
+
+Building this surfaced several defects in the original tool, all documented in
+[docs/legacy/known-bugs.md](docs/legacy/known-bugs.md). Three worth knowing if you still
+use it:
+
+- **It fails silently.** Seven of nine processed sample files carried the `; Edited by`
+  header and an *empty* estimated-time field but contained **no `M104` commands at all** —
+  they look processed and are not. Worse, the header makes its own re-processing guard
+  reject the file, so it cannot simply be re-run.
+- **The Speed↔Quality scale is inverted** relative to this tool. Copying
+  `SPEED_QUALITY_OPT` across without subtracting from 10 gives prints ~14 °C colder.
+- **Saving a filament profile writes the wrong control's value**, so the speed/quality
+  setting silently does not persist.
+- Windows only. The core library is portable and builds on Linux, but process execution is
+  not implemented there yet.
+- Multi-tool and multi-material printing are not supported.
+- Arc moves (`G2`/`G3`) work but are slow — the estimator subdivides them.
+
+---
+
+# Original Delphi Version (V1.1)
+
+> Everything below documents the original released application. It remains the version to
+> use for real printing until the rewrite has been physically validated.
+
 > **This script dynamically adjusts nozzle temperature and print speed (flow rate) to significantly improve print quality and reduce print time, all while simplifying slicer settings. By optimizing these parameters, it makes 3D printing more accessible, less complex and faster.  **
 
 Most slicers use a fixed nozzle temperature throughout an entire print, even though the extrusion flow constantly changes. This means the filament is often printed either hotter or colder than necessary.

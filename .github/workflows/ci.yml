@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch makes the previous run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows is what ships.
+          - name: windows-msvc-release
+            os: windows-latest
+            preset: RelWithDebInfo
+            cli: ON
+          - name: windows-msvc-debug
+            os: windows-latest
+            preset: Debug
+            cli: ON
+          # Linux builds core + tests only: the CLI is Windows-specific today. Keeping it
+          # green is the cheapest possible proof that core stayed portable and free of UI
+          # dependencies, which is the property ADR-0002 exists to protect.
+          - name: linux-gcc
+            os: ubuntu-latest
+            preset: RelWithDebInfo
+            cli: OFF
+          - name: linux-clang
+            os: ubuntu-latest
+            preset: RelWithDebInfo
+            cli: OFF
+            cc: clang
+            cxx: clang++
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Select compiler
+        if: matrix.cc != ''
+        run: |
+          echo "CC=${{ matrix.cc }}" >> $GITHUB_ENV
+          echo "CXX=${{ matrix.cxx }}" >> $GITHUB_ENV
+
+      - name: Cache Catch2
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ matrix.name }}-${{ hashFiles('tests/CMakeLists.txt') }}
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.preset }}
+          -DSB53_BUILD_CLI=${{ matrix.cli }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --timeout 300
+
+      - name: Upload binaries
+        if: matrix.name == 'windows-msvc-release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowtemp-windows
+          path: build/bin/*.exe
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: sanitizers (asan+ubsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      # This code transliterates numeric logic and indexes parallel arrays constantly.
+      # UBSan in particular catches the signed-overflow and uninitialised-read patterns
+      # that this domain invites -- the legacy tool shipped exactly such a bug
+      # (docs/legacy/known-bugs.md #3).
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSB53_BUILD_CLI=OFF
+          -DSB53_SANITIZE=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --output-on-failure --timeout 600
+
+  # ---------------------------------------------------------------------------
+  static-analysis:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Install clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy
+
+      - name: Configure with compile commands
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSB53_BUILD_CLI=OFF
+          -DSB53_BUILD_TESTS=OFF
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Analyse core
+        run: |
+          find core/src core/include -name '*.cpp' -o -name '*.hpp' \
+            | xargs clang-tidy -p build --warnings-as-errors='*'
+
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Install gcovr
+        run: pipx install gcovr
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSB53_BUILD_CLI=OFF
+          -DSB53_COVERAGE=ON
+
+      - name: Build and test
+        run: |
+          cmake --build build
+          cd build && ctest --output-on-failure
+
+      - name: Report
+        run: |
+          gcovr --root . --filter 'core/' --exclude '.*third_party.*' \
+                --xml-pretty -o coverage.xml --print-summary \
+                --fail-under-line 60
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  # ---------------------------------------------------------------------------
+  architecture:
+    name: architectural guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The core being free of UI dependencies is what makes the planned OrcaSlicer
+      # plugin a routing layer rather than a rewrite (ADR-0002). If it erodes quietly,
+      # the cost is only discovered when the second frontend is attempted, far too late.
+      - name: core must not depend on Qt or any UI
+        run: cmake -DSB53_CORE_DIR=core -P cmake/CheckNoQt.cmake
+
+      - name: core must not write to stdout/stderr
+        run: |
+          if grep -rnE '\b(std::cout|std::cerr|printf|fprintf)\b' core/src core/include \
+               --include='*.cpp' --include='*.hpp' ; then
+            echo "::error::core must report through Diagnostics, never by printing (ADR-0002)"
+            exit 1
+          fi
+          echo "OK"

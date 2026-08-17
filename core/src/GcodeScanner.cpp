@@ -1,0 +1,303 @@
+#include "sb53/GcodeScanner.hpp"
+
+#include "sb53/GcodeText.hpp"
+#include "sb53/Version.hpp"
+
+#include <charconv>
+#include <istream>
+#include <string>
+
+namespace sb53 {
+namespace {
+
+constexpr std::string_view kBom = "\xEF\xBB\xBF";
+
+// Body start. OrcaSlicer emits `;HEIGHT:`; PrusaSlicer-style output uses `; Z_HEIGHT:`.
+constexpr std::string_view kHeightMarker  = ";HEIGHT:";
+constexpr std::string_view kZHeightMarker = "; Z_HEIGHT:";
+
+// Body end.
+constexpr std::string_view kExecutableEnd = "; EXECUTABLE_BLOCK_END";
+constexpr std::string_view kPrintEnd      = "; PRINT_END";
+
+// The legacy tool's header marker. We must recognise it as well as our own, or a file
+// it produced would be processed a second time and the adjustments would compound.
+constexpr std::string_view kLegacyMarker = "; Edited by";
+
+[[nodiscard]] bool startsWith(std::string_view s, std::string_view prefix) noexcept
+{
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+// Note: there is no local `trim` here. It moved to GcodeText.hpp when the scanner and
+// rewriter were made to share their parsing, and the leftover copy in this file was
+// unused -- caught by GCC's -Wunused-function, which MSVC does not report.
+
+// True when `line` is a bare G-code command, i.e. the token appears at the start and is
+// followed by end-of-line, whitespace, or a comment. Prevents `M83` from matching
+// `M831` or a mention inside a comment.
+[[nodiscard]] bool isCommand(std::string_view line, std::string_view command) noexcept
+{
+    if (!startsWith(line, command)) {
+        return false;
+    }
+    if (line.size() == command.size()) {
+        return true;
+    }
+    const char next = line[command.size()];
+    return next == ' ' || next == '\t' || next == ';';
+}
+
+} // namespace
+
+namespace detail {
+
+std::string_view normaliseLine(std::string_view line, bool isFirstLine)
+{
+    if (isFirstLine && startsWith(line, kBom)) {
+        line.remove_prefix(kBom.size());
+    }
+    // Input may be CRLF regardless of platform; std::getline only strips the LF.
+    if (!line.empty() && line.back() == '\r') {
+        line.remove_suffix(1);
+    }
+    return line;
+}
+
+double parseDuration(std::string_view text)
+{
+    // Accepts the slicer's "1d 2h 3m 4s" form, any subset, in any order.
+    double total = 0.0;
+    double number = 0.0;
+    bool haveNumber = false;
+
+    // A while loop, not a for loop: each iteration advances `i` by a variable amount (the
+    // width of whatever from_chars just consumed), which a for-loop's fixed `++i` header
+    // does not express cleanly. An earlier version used a for-loop with `i +=
+    // (consumed - 1)` in the body to compensate for that header increment, which CodeQL's
+    // cpp/loop-variable-changed correctly flagged as hard to follow -- not because it was
+    // wrong (it was traced correct and is covered by test_scanner.cpp), but because nothing
+    // about a for-loop's header suggests its own increment is only part of the step size.
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const char c = text[i];
+        if (c >= '0' && c <= '9') {
+            const auto* begin = text.data() + i;
+            const auto* end = text.data() + text.size();
+            double v = 0.0;
+            const auto [ptr, ec] = std::from_chars(begin, end, v);
+            if (ec == std::errc{}) {
+                number = v;
+                haveNumber = true;
+                i += static_cast<std::size_t>(ptr - begin);   // past every digit consumed
+            } else {
+                ++i;   // malformed number; do not spin on the same character forever
+            }
+            continue;
+        }
+        if (haveNumber) {
+            switch (c) {
+            case 'd': total += number * 86400.0; haveNumber = false; break;
+            case 'h': total += number * 3600.0;  haveNumber = false; break;
+            case 'm': total += number * 60.0;    haveNumber = false; break;
+            case 's': total += number;           haveNumber = false; break;
+            default: break;
+            }
+        }
+        ++i;
+    }
+    return total;
+}
+
+std::optional<std::string_view> commentValue(std::string_view line, std::string_view key)
+{
+    if (line.empty() || line.front() != ';') {
+        return std::nullopt;
+    }
+
+    std::string_view rest = trim(line.substr(1));
+    if (!startsWith(rest, key)) {
+        return std::nullopt;
+    }
+    rest.remove_prefix(key.size());
+
+    rest = trim(rest);
+    if (rest.empty() || rest.front() != '=') {
+        return std::nullopt;   // e.g. `; filament_settings_id_extra` — not our key
+    }
+    rest = trim(rest.substr(1));
+
+    // OrcaSlicer quotes values containing spaces; the quotes are its escaping, not part
+    // of the name.
+    if (rest.size() >= 2 && rest.front() == '"' && rest.back() == '"') {
+        rest = rest.substr(1, rest.size() - 2);
+    }
+    return rest;
+}
+
+} // namespace detail
+
+ScanResult GcodeScanner::scan(std::istream& in, DiagnosticList& diagnostics)
+{
+    ScanResult result;
+
+    std::string buffer;
+    std::size_t lineNumber = 0;
+    bool sawExtrusionMode = false;
+
+    while (std::getline(in, buffer)) {
+        ++lineNumber;
+        const std::string_view line =
+            detail::normaliseLine(buffer, lineNumber == 1);
+
+        // --- preconditions ---------------------------------------------------
+
+        // First extrusion-mode command wins. A later change would be unusual, and
+        // honouring the first matches how the print actually begins.
+        if (!sawExtrusionMode) {
+            if (isCommand(line, "M83")) {
+                result.extrusionMode = ExtrusionMode::Relative;
+                sawExtrusionMode = true;
+            } else if (isCommand(line, "M82")) {
+                result.extrusionMode = ExtrusionMode::Absolute;
+                sawExtrusionMode = true;
+            }
+        }
+
+        if (!result.alreadyProcessed &&
+            (startsWith(line, kProcessedMarker) || startsWith(line, kLegacyMarker))) {
+            result.alreadyProcessed = true;
+        }
+
+        // --- print body bounds ------------------------------------------------
+        //
+        // Asymmetric by design, matching the legacy: the line that *marks* the start is
+        // part of the body, but the line that marks the end is not. Getting this wrong
+        // shifts every downstream artefact by one line.
+
+        const bool isLayerMarker =
+            startsWith(line, kHeightMarker) || startsWith(line, kZHeightMarker);
+
+        if (result.bodyFirstLine == 0 && isLayerMarker) {
+            result.bodyFirstLine = lineNumber;
+        }
+
+        // Within the body, track filament and layer starts.
+        //
+        // The accumulation rule MUST match GcodeRewriter's, or the layer boundaries land
+        // at the wrong place in the plan. Both use detail::isExtrudingMove for exactly
+        // that reason.
+        if (result.bodyFirstLine != 0 && result.bodyLastLine == 0) {
+            if (isLayerMarker) {
+                LayerMark mark;
+                mark.usedFilament = result.bodyFilament;
+                mark.line = lineNumber;
+
+                const auto colon = line.find(':');
+                if (colon != std::string_view::npos) {
+                    const std::string_view value = line.substr(colon + 1);
+                    double height = 0.0;
+                    const auto* begin = value.data();
+                    if (std::from_chars(begin, begin + value.size(), height).ec ==
+                        std::errc{}) {
+                        mark.height = height;
+                    }
+                }
+                result.layers.push_back(mark);
+            } else if (detail::isExtrudingMove(line)) {
+                if (const auto e = detail::word(line, 'E')) {
+                    result.bodyFilament += *e;
+                }
+            }
+        }
+
+        if (result.bodyFirstLine != 0 && result.bodyLastLine == 0 &&
+            (startsWith(line, kExecutableEnd) || startsWith(line, kPrintEnd))) {
+            result.bodyLastLine = lineNumber - 1;   // exclusive of the marker itself
+        }
+
+        // --- slicer identity --------------------------------------------------
+        //
+        // These live in the config block *after* the executable block, so the scan
+        // cannot stop once the body is bounded.
+
+        if (result.printerSettingsId.empty()) {
+            if (const auto v = detail::commentValue(line, "printer_settings_id")) {
+                result.printerSettingsId = std::string(*v);
+            }
+        }
+        if (result.filamentSettingsId.empty()) {
+            if (const auto v = detail::commentValue(line, "filament_settings_id")) {
+                result.filamentSettingsId = std::string(*v);
+            }
+        }
+        if (result.filamentType.empty()) {
+            if (const auto v = detail::commentValue(line, "filament_type")) {
+                result.filamentType = std::string(*v);
+            }
+        }
+
+        // The slicer's own estimate, e.g. "; estimated printing time (normal mode) = 7m 18s".
+        // Used only as a cross-check on our timing -- see ScanResult::slicerEstimatedTime.
+        if (result.slicerEstimatedTime <= 0.0 &&
+            startsWith(line, "; estimated printing time")) {
+            if (const auto eq = line.find('='); eq != std::string_view::npos) {
+                result.slicerEstimatedTime = detail::parseDuration(line.substr(eq + 1));
+            }
+        }
+    }
+
+    result.totalLines = lineNumber;
+
+    // --- report -------------------------------------------------------------
+
+    if (lineNumber == 0) {
+        diagnostics.add(error(Code::FileEmpty, "The G-code file is empty."));
+        return result;
+    }
+
+    if (result.alreadyProcessed) {
+        diagnostics.add(error(
+            Code::AlreadyProcessed,
+            "This file has already been processed. Re-processing would compound the "
+            "temperature and speed adjustments already applied. Re-export it from your "
+            "slicer instead."));
+    }
+
+    switch (result.extrusionMode) {
+    case ExtrusionMode::Absolute:
+        diagnostics.add(error(
+            Code::AbsoluteExtrusionUnsupported,
+            "This file uses absolute extrusion (M82). Flow tracking requires relative "
+            "extrusion. Enable 'Use relative E distances' in your slicer's printer "
+            "settings and re-export."));
+        break;
+    case ExtrusionMode::Unknown:
+        diagnostics.add(error(
+            Code::ExtrusionModeUnknown,
+            "Neither M82 nor M83 was found, so relative extrusion could not be "
+            "confirmed. Firmware defaults to absolute extrusion, which this tool cannot "
+            "process correctly. Enable 'Use relative E distances' in your slicer."));
+        break;
+    case ExtrusionMode::Relative:
+        break;
+    }
+
+    if (!result.hasPrintBody()) {
+        // Distinguish the two ways this fails, because the fixes differ.
+        const bool foundStart = result.bodyFirstLine != 0;
+        diagnostics.add(error(
+            Code::PrintBodyNotFound,
+            foundStart
+                ? "Found the start of the print but not its end. Expected a "
+                  "'; EXECUTABLE_BLOCK_END' or '; PRINT_END' marker. If your printer's "
+                  "end G-code is custom, add '; PRINT_END' as its first line."
+                : "Could not locate the print body. Expected a ';HEIGHT:' or "
+                  "'; Z_HEIGHT:' marker. This tool currently supports OrcaSlicer and "
+                  "PrusaSlicer output."));
+    }
+
+    return result;
+}
+
+} // namespace sb53
