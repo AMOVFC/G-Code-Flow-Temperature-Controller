@@ -1,0 +1,28 @@
+# Normalise line endings.
+#
+# The build is developed on Windows but CI also builds on Linux, and G-code fixtures are
+# compared byte-for-byte in places. Leaving this to each developer's core.autocrlf
+# setting produces spurious whole-file diffs and, worse, fixture comparisons that fail
+# for reasons having nothing to do with the code.
+
+* text=auto eol=lf
+
+# Windows-only tooling that genuinely wants CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Legacy Delphi sources — reference only, never built. Preserve them byte-for-byte
+# rather than renormalising a tree we do not compile.
+Source/** -text
+
+# Binary
+*.exe  binary
+*.sdb  binary
+*.res  binary
+*.png  binary
+*.jpg  binary
+
+# G-code fixtures: keep exact bytes; these are compared literally in tests.
+*.gcode -text
+testdata/** -text
